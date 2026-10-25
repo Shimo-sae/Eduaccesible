@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'main.dart';
 import 'senas.dart';
 import 'servicios.dart';
@@ -43,7 +42,7 @@ class _InicioState extends State<Inicio> {
 
   Future<void> _arrancar() async {
     await voz.iniciar();
-    await [Permission.camera, Permission.microphone].request();
+    // Los permisos de cámara y micrófono los pide el propio plugin de cámara y de voz al usarlos.
     if (camaras.isNotEmpty) {
       cam = CameraController(camaras.first, ResolutionPreset.high, enableAudio: false);
       try {

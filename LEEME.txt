@@ -1,0 +1,4 @@
+Sube TODA esta carpeta a un repositorio nuevo de GitHub (github.com -> New repository -> "Upload files").
+En la pestaña Actions aparecen dos trabajos: "Crear instalador EduAccesible (.exe)" y "Crear EduAccesible.apk".
+Entra a cada uno -> cuando termine (marca verde) -> baja en la página hasta "Artifacts" y descarga el archivo.
+Si alguno sale en rojo, copia el texto del error y mándaselo a Claude.

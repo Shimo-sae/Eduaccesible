@@ -1,0 +1,12 @@
+numpy<2
+opencv-python
+pillow
+pytesseract
+pyttsx3
+pywin32
+mediapipe==0.10.14
+rapidocr-onnxruntime
+onnxruntime
+vosk
+sounddevice
+SpeechRecognition

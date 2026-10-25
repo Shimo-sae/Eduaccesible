@@ -1,0 +1,21 @@
+name: eduaccesible
+description: EduAccesible - La información también se escucha
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  camera: ^0.10.5+9
+  flutter_tts: ^4.0.2
+  speech_to_text: ^6.6.0
+  google_mlkit_text_recognition: ^0.13.0
+  google_mlkit_object_detection: ^0.13.0
+  path_provider: ^2.1.2
+  permission_handler: ^11.3.0
+
+flutter:
+  uses-material-design: true

@@ -1,0 +1,51 @@
+name: Crear instalador EduAccesible (.exe)
+on:
+  workflow_dispatch:
+  push:
+    paths: ["app/**", ".github/workflows/exe.yml"]
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar Tesseract e Inno Setup
+        shell: pwsh
+        run: |
+          choco install tesseract innosetup -y --no-progress
+          Invoke-WebRequest "https://github.com/tesseract-ocr/tessdata_fast/raw/main/spa.traineddata" -OutFile "C:\Program Files\Tesseract-OCR\tessdata\spa.traineddata"
+      - name: Instalar librerías de Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Descargar los modelos (voz y objetos)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force modelos | Out-Null
+          Invoke-WebRequest "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip" -OutFile vosk.zip
+          Expand-Archive vosk.zip -DestinationPath vosk_tmp
+          Move-Item (Get-ChildItem vosk_tmp | Select-Object -First 1).FullName modelos\vosk-es
+          Invoke-WebRequest "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/object_detection_yolox/object_detection_yolox_2022nov.onnx" -OutFile modelos\yolox_s.onnx
+      - name: Crear el programa con PyInstaller
+        run: >
+          python -m PyInstaller --noconfirm --clean --onedir --noconsole --name EduAccesible
+          --collect-all mediapipe --collect-all rapidocr_onnxruntime --collect-all vosk --collect-all onnxruntime
+          --collect-submodules win32com --hidden-import pythoncom --hidden-import win32timezone
+          --hidden-import pyttsx3.drivers --hidden-import pyttsx3.drivers.sapi5 app.py
+      - name: Meter Tesseract y los modelos dentro del programa
+        shell: pwsh
+        run: |
+          Copy-Item "C:\Program Files\Tesseract-OCR" dist\EduAccesible\tesseract -Recurse
+          Copy-Item modelos dist\EduAccesible\modelos -Recurse
+      - name: Crear el instalador
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" instalador.iss'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EduAccesible-Instalador-exe
+          path: app/Output/EduAccesible-Instalador.exe

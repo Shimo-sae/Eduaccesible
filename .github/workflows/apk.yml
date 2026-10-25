@@ -33,9 +33,10 @@ jobs:
           open(m, "w", encoding="utf-8").write(s)
           for g in glob.glob("build_app/android/app/build.gradle*"):
               t = open(g, encoding="utf-8").read()
-              t = re.sub(r"minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 21", t)
-              t = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 21", t)
+              t = re.sub(r"minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 24", t)
+              t = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 24", t)
               open(g, "w", encoding="utf-8").write(t)
+          open("build_app/android/gradle.properties", "a").write("\nandroid.newDsl=false\n")
           PY
       - name: Compilar el APK
         working-directory: build_app

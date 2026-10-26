@@ -172,6 +172,27 @@ class Voz:
         self.ultimo_fin = 0.0
         threading.Thread(target=self._bucle, daemon=True).start()
 
+    hay_espanol = True
+    _avisado_espanol = False
+
+    @staticmethod
+    def _buscar_espanol(voces):
+        """Índice de la mejor voz en español: primero por IDIOMA de la voz (código 0A = español), luego por nombre.
+        Prefiere las voces de Latinoamérica (México, EE. UU., Colombia...) sobre la de España."""
+        candidatas = []
+        for i in range(voces.Count):
+            v = voces.Item(i)
+            desc = v.GetDescription().lower()
+            try:
+                langs = [int(x, 16) for x in v.GetAttribute("Language").replace(" ", "").split(";") if x]
+            except Exception:
+                langs = []
+            es = any((l & 0x3FF) == 0x0A for l in langs) or any(k in desc for k in ("spanish", "español", "espanol"))
+            if es:
+                latam = any(k in desc for k in ("mexic", "méxic", "united states", "colomb", "argent", "latin", "perú", "peru", "chile"))
+                candidatas.append((0 if latam else 1, i))
+        return min(candidatas)[1] if candidatas else None
+
     # --- SAPI (voz de Windows) ---
     def _crear_voz(self):
         import win32com.client
@@ -179,11 +200,13 @@ class Voz:
         voz.Rate = -1
         voz.Volume = 100
         voces = voz.GetVoices()
-        for i in range(voces.Count):
-            desc = voces.Item(i).GetDescription()
-            if any(k in desc.lower() for k in ("spanish", "español", "espanol")):
-                voz.Voice = voces.Item(i)
-                break
+        elegida = self._buscar_espanol(voces)
+        if elegida is not None:
+            voz.Voice = voces.Item(elegida)
+            self.hay_espanol = True
+        else:
+            # Sin voz en español, Windows lee con la voz en inglés y las palabras salen mezcladas.
+            self.hay_espanol = False
         salidas = voz.GetAudioOutputs()
         if self.salida is not None and 0 <= self.salida < salidas.Count:
             voz.AudioOutput = salidas.Item(self.salida)
@@ -196,6 +219,8 @@ class Voz:
             pythoncom.CoInitialize()
             voz = self._crear_voz()
             print(f"Voz en uso: {voz.Voice.GetDescription()}")
+            if not self.hay_espanol:
+                print("AVISO: Windows no tiene ninguna voz en español instalada.")
         except Exception as e:
             print(f"SAPI no disponible ({e}); se usa pyttsx3.")
             self._trabajar()
@@ -216,6 +241,10 @@ class Voz:
                     # Recrear la voz tras unos segundos de silencio: así sigue a Windows si conectas
                     # audífonos Bluetooth o de cable. Entre frases seguidas no se recrea (ahorra ~0,2 s cada una).
                     voz = self._crear_voz()
+                if not self.hay_espanol and not self._avisado_espanol:
+                    self._avisado_espanol = True
+                    item = ("Atención: este computador no tiene voz en español instalada. Se oirá mezclado con inglés. "
+                            "Instálala en Configuración, Hora e idioma, Idioma y región, Español, Opciones, Voz. ") + item
                 self._hablando.set()
                 voz.Speak(item, 1)  # asíncrono: así se puede cortar a mitad de frase
                 while not voz.WaitUntilDone(100):
@@ -1836,7 +1865,7 @@ class EduAccesibleApp:
         b = tk.Button(padre, text=texto, command=comando, bg=color, fg=fg,
                       activebackground=Interfaz_oscuro(color), activeforeground=fg,
                       font=("Segoe UI", fuente, "bold"), relief="flat", bd=0,
-                      cursor="hand2", highlightthickness=3, highlightbackground=CREMA, highlightcolor=TEXTO, **kw)
+                      cursor="hand2", highlightthickness=1, highlightbackground=CREMA, highlightcolor=TEXTO, **kw)
         b.bind("<Enter>", lambda e: b.config(bg=Interfaz_oscuro(color)))   # resalta el botón bajo el mouse
         b.bind("<Leave>", lambda e: b.config(bg=color))
         return b
@@ -1876,7 +1905,7 @@ class EduAccesibleApp:
         self.mostrar("menu")
 
     def _pantalla_menu(self):
-        f = tk.Frame(self.contenido, bg=CREMA)
+        ext, f = self._marco_scroll()
         tk.Label(f, text="¿Qué quieres hacer?", font=("Segoe UI", 18, "bold"), fg=TEXTO, bg=CREMA).pack(pady=(5, 10))
         opciones = [
             ("📖  1. Leer texto   ☝ 1 dedo", VERDE, "white", lambda: self.abrir_modo("texto")),
@@ -1893,8 +1922,8 @@ class EduAccesibleApp:
                          "Pregunta: «¿cuál es la seña de materiales?»",
                  font=("Segoe UI", 10, "bold"), fg=VERDE, bg=CREMA, wraplength=620).pack(pady=(4, 0))
         tk.Label(f, text="Atajos: 1-7 elegir · C capturar · R repetir · V orden por voz · J señas · H voz siempre activa · I cambiar micrófono · L micrófono laptop · S silencio · M inicio · Esc atrás",
-                 font=("Segoe UI", 10), fg=TEXTO, bg=CREMA).pack(pady=8)
-        return f
+                 font=("Segoe UI", 10), fg=TEXTO, bg=CREMA, wraplength=620).pack(pady=8)
+        return ext
 
     def _pantalla_modo(self):
         f = tk.Frame(self.contenido, bg=CREMA)
@@ -1912,8 +1941,27 @@ class EduAccesibleApp:
         self.boton(fila, "🎤 Hablar (V)", VERDE, self.escuchar_orden, fuente=12).pack(side="left", padx=5, ipady=6, ipadx=12)
         return f
 
+    def _marco_scroll(self):
+        """Pantalla con barra de desplazamiento (rueda del mouse incluida): si el contenido no cabe, se puede bajar."""
+        ext = tk.Frame(self.contenido, bg=CREMA)
+        lienzo = tk.Canvas(ext, bg=CREMA, highlightthickness=0)
+        barra = tk.Scrollbar(ext, orient="vertical", command=lienzo.yview)
+        lienzo.configure(yscrollcommand=barra.set)
+        barra.pack(side="right", fill="y")
+        lienzo.pack(side="left", fill="both", expand=True)
+        interno = tk.Frame(lienzo, bg=CREMA)
+        ventana = lienzo.create_window((0, 0), window=interno, anchor="nw")
+        interno.bind("<Configure>", lambda e: lienzo.configure(scrollregion=lienzo.bbox("all")))
+        lienzo.bind("<Configure>", lambda e: lienzo.itemconfigure(ventana, width=e.width))
+
+        def rueda(e):
+            if ext.winfo_ismapped() and interno.winfo_reqheight() > lienzo.winfo_height():
+                lienzo.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+        lienzo.bind_all("<MouseWheel>", rueda, add="+")
+        return ext, interno
+
     def _pantalla_ajustes(self):
-        f = tk.Frame(self.contenido, bg=CREMA)
+        ext, f = self._marco_scroll()
         tk.Label(f, text="Ajustes", font=("Segoe UI", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 8))
         for texto, color, fg, cmd in [
             ("🔄  Cambiar cámara  (K)", VERDE, "white", self.cambiar_camara),
@@ -1934,7 +1982,7 @@ class EduAccesibleApp:
                 self.btn_gestos = b
             if "siempre activa" in texto:
                 self.btn_voz = b
-        return f
+        return ext
 
     def _pantalla_senas(self):
         f = tk.Frame(self.contenido, bg=CREMA)

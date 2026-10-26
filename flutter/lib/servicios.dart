@@ -18,7 +18,45 @@ class Voz {
   bool hablando = false;
 
   Future<void> iniciar() async {
-    await _tts.setLanguage('es-ES');
+    // Elige una voz realmente en español (si no, Android lee con su voz en inglés y mezcla los idiomas).
+    var fijada = false;
+    for (final cod in ['es-CO', 'es-MX', 'es-US', 'es-419', 'es-ES']) {
+      try {
+        final r = await _tts.isLanguageAvailable(cod);
+        if (r == true || r == 1) {
+          await _tts.setLanguage(cod);
+          fijada = true;
+          break;
+        }
+      } catch (_) {}
+    }
+    if (!fijada) {
+      try {
+        await _tts.setLanguage('es-ES');
+      } catch (_) {}
+    }
+    try {
+      final voces = await _tts.getVoices;
+      if (voces is List) {
+        final es = voces.where((v) {
+          final loc = (v is Map ? (v['locale'] ?? '') : '').toString().toLowerCase().replaceAll('_', '-');
+          return loc.startsWith('es');
+        }).toList();
+        if (es.isNotEmpty) {
+          es.sort((a, b) {
+            int pt(dynamic v) {
+              final loc = (v['locale'] ?? '').toString().toLowerCase().replaceAll('_', '-');
+              var n = 0;
+              if (loc.contains('es-co') || loc.contains('es-mx') || loc.contains('es-us') || loc.contains('es-419')) n -= 2;
+              if (v['network_required'].toString() == '1') n += 1; // mejor una voz que funcione sin internet
+              return n;
+            }
+            return pt(a).compareTo(pt(b));
+          });
+          await _tts.setVoice({'name': es.first['name'].toString(), 'locale': es.first['locale'].toString()});
+        }
+      }
+    } catch (_) {}
     await _tts.setSpeechRate(0.5);
     _tts.setStartHandler(() => hablando = true);
     _tts.setCompletionHandler(() => hablando = false);
@@ -110,7 +148,15 @@ class Escucha {
           }
         }
         _idioma ??= ls.where((l) => l.localeId.toLowerCase().startsWith('es')).map((l) => l.localeId).firstOrNull;
-      } catch (_) {}
+        if (_idioma == null) {
+          // Sin español en la lista: se fuerza igual (si se deja vacío usaría el idioma del teléfono, p. ej. inglés,
+          // y mezclaría los idiomas). Si el teléfono no lo tiene, avisará con un error claro.
+          _idioma = 'es_ES';
+          alError?.call('El teléfono no muestra reconocimiento de voz en español. Instálalo en Ajustes > Idioma > Escritura por voz (Google).');
+        }
+      } catch (_) {
+        _idioma ??= 'es_ES';
+      }
     }
     return listo;
   }

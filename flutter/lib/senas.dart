@@ -211,6 +211,41 @@ const Set<String> _relleno = {'sena', 'senas', 'gesto', 'de', 'del', 'la', 'el',
   'cuales', 'es', 'son', 'que', 'como', 'se', 'hace', 'hago', 'haces', 'una', 'un', 'dime', 'dame', 'repite',
   'me', 'puedes', 'decir', 'quiero', 'saber', 'a', 'en', 'por', 'favor'};
 
+// Si el reconocedor oye en inglés (o mezcla los idiomas), estas palabras llegan igual: se aceptan también.
+const List<_O> _ordenesIngles = [
+  _O(['settings', 'setup'], 'ajustes'),
+  _O(['buttons'], 'botones'),
+  _O(['import', 'document', 'file', 'gallery'], 'importar'),
+  _O(['saved', 'materials'], 'materiales'),
+  _O(['count', 'objects', 'things'], 'm_objetos'),
+  _O(['shapes', 'figures', 'geometric'], 'm_figuras'),
+  _O(['numbers', 'number', 'digits'], 'm_numeros'),
+  _O(['letters', 'words', 'alphabet'], 'm_letras'),
+  _O(['read', 'text', 'reading'], 'm_texto'),
+  _O(['capture', 'photo', 'scan', 'take'], 'capturar'),
+  _O(['repeat', 'again'], 'repetir'),
+  _O(['stop', 'quiet', 'silence', 'mute'], 'silencio'),
+  _O(['home', 'menu', 'main'], 'inicio'),
+  _O(['back', 'return', 'exit'], 'atras'),
+  _O(['gestures', 'gesture'], 'gestos_on'),
+  _O(['camera', 'switch'], 'camara'),
+];
+
+int _distancia(String a, String b) {
+  if (a == b) return 0;
+  var prev = List<int>.generate(b.length + 1, (i) => i);
+  for (var i = 1; i <= a.length; i++) {
+    final cur = List<int>.filled(b.length + 1, 0);
+    cur[0] = i;
+    for (var j = 1; j <= b.length; j++) {
+      final c = a[i - 1] == b[j - 1] ? 0 : 1;
+      cur[j] = math.min(math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + c);
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
 String? _ordenBase(String texto) {
   final base = sinTildes(texto);
   final t = ' $base ';
@@ -223,7 +258,31 @@ String? _ordenBase(String texto) {
       }
     }
   }
-  return null;
+  final palabras = base.split(RegExp(r'\s+')).where((p) => p.length >= 3).toList();
+  // Palabras en inglés (el reconocedor a veces oye así)
+  for (final o in _ordenesIngles) {
+    for (final c in o.claves) {
+      if (palabras.contains(c)) return o.orden;
+    }
+  }
+  // Mal oído por poco: "numeroz", "figuas", "ajustez"... se acepta con 1 letra de diferencia (2 si es larga).
+  String? mejor;
+  var mejorD = 99;
+  for (final o in _ordenes) {
+    for (final c in o.claves) {
+      if (c.contains(' ') || c.length < 5) continue;
+      for (final p in palabras) {
+        if ((p.length - c.length).abs() > 2) continue;
+        final d = _distancia(p, c);
+        final tope = c.length >= 8 ? 2 : 1;
+        if (d <= tope && d < mejorD) {
+          mejorD = d;
+          mejor = o.orden;
+        }
+      }
+    }
+  }
+  return mejor;
 }
 
 /// Devuelve la orden dicha, 'sena:<orden>' si preguntan por una seña, o 'senas_lista'.

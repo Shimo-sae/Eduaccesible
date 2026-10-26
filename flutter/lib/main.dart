@@ -30,6 +30,20 @@ class EduApp extends StatelessWidget {
           useMaterial3: true,
           scaffoldBackgroundColor: crema,
           colorScheme: ColorScheme.fromSeed(seedColor: morado),
+          cardTheme: CardThemeData(
+            color: Colors.white,
+            elevation: 1,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          ),
+          filledButtonTheme: FilledButtonThemeData(
+            style: FilledButton.styleFrom(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              textStyle: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+          bottomSheetTheme: const BottomSheetThemeData(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+          ),
         ),
         home: const Inicio(),
       );

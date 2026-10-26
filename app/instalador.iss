@@ -13,6 +13,9 @@ SolidCompression=yes
 DiskSpanning=no
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\EduAccesible.exe
+SetupIconFile=logo.ico
+WizardStyle=modern
+CloseApplications=yes
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
@@ -29,3 +32,7 @@ Name: "{autodesktop}\EduAccesible"; Filename: "{app}\EduAccesible.exe"; Tasks: e
 
 [Run]
 Filename: "{app}\EduAccesible.exe"; Description: "Abrir EduAccesible"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; Al desinstalar se borra TODO lo que la app guardó o descargó (materiales, ajustes, entrada, modelos)
+Type: filesandordirs; Name: "{app}"

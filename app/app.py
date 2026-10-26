@@ -21,6 +21,7 @@ os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS",
 
 import cv2
 import numpy as np
+cv2.setNumThreads(2)  # menos hilos peleando con la ventana y el lector de texto
 import pytesseract
 import pyttsx3
 from PIL import Image, ImageTk
@@ -117,6 +118,15 @@ MODOS = {
     "objetos": "Contar objetos",
 }
 ORDEN_MODOS = ["texto", "letras", "numeros", "figuras", "objetos"]
+
+
+def Interfaz_oscuro(color, f=0.88):
+    """Versión un poco más oscura de un color #rrggbb (efecto al pasar el mouse)."""
+    try:
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+        return "#%02x%02x%02x" % (int(r * f), int(g * f), int(b * f))
+    except Exception:
+        return color
 
 
 def leer_config():
@@ -1750,6 +1760,13 @@ class EduAccesibleApp:
     def __init__(self, root):
         self.root = root
         self.root.title("EduAccesible - La información también se escucha")
+        for _ico in (os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "logo.ico"), os.path.join(BASE_DIR, "logo.ico")):
+            if os.path.exists(_ico):
+                try:
+                    self.root.iconbitmap(_ico)
+                except Exception:
+                    pass
+                break
         self.root.geometry("980x700")
         self.root.minsize(900, 640)
         self.root.config(bg=CREMA)
@@ -1806,30 +1823,33 @@ class EduAccesibleApp:
     def _abrir_camara_inicial(self):
         cap = self.abrir_camara_auto()
         if cap is None:
-            self.ui(lambda: self.video_label.config(text="Cámara no disponible", fg="white", font=("Arial", 16, "bold")))
+            self.ui(lambda: self.video_label.config(text="Cámara no disponible", fg="white", font=("Segoe UI", 16, "bold")))
             self.voz.hablar("No se pudo abrir la cámara. Puedes importar imágenes desde materiales.")
             return
         self.cap = cap
-        if leer_config().get("gestos"):  # los gestos necesitan la cámara ya abierta
+        if leer_config().get("gestos", True):  # (encendidos por defecto) los gestos necesitan la cámara ya abierta
             self.ui(lambda: self.alternar_gestos(True, silencioso=True))
 
     # ---------------------------- Interfaz --------------------------------
     @staticmethod
     def boton(padre, texto, color, comando, fg="white", fuente=15, **kw):
-        return tk.Button(padre, text=texto, command=comando, bg=color, fg=fg,
-                         activebackground=color, activeforeground=fg,
-                         font=("Arial", fuente, "bold"), relief="flat", bd=0,
-                         cursor="hand2", **kw)
+        b = tk.Button(padre, text=texto, command=comando, bg=color, fg=fg,
+                      activebackground=Interfaz_oscuro(color), activeforeground=fg,
+                      font=("Segoe UI", fuente, "bold"), relief="flat", bd=0,
+                      cursor="hand2", highlightthickness=3, highlightbackground=CREMA, highlightcolor=TEXTO, **kw)
+        b.bind("<Enter>", lambda e: b.config(bg=Interfaz_oscuro(color)))   # resalta el botón bajo el mouse
+        b.bind("<Leave>", lambda e: b.config(bg=color))
+        return b
 
     def _construir_interfaz(self):
         cab = tk.Frame(self.root, bg=CREMA)
         cab.pack(pady=(10, 0))
-        tk.Label(cab, text="Edu", font=("Arial", 30, "bold"), fg=NARANJA, bg=CREMA).pack(side="left")
-        tk.Label(cab, text="Accesible", font=("Arial", 30, "bold"), fg=VERDE, bg=CREMA).pack(side="left")
+        tk.Label(cab, text="Edu", font=("Segoe UI", 30, "bold"), fg=NARANJA, bg=CREMA).pack(side="left")
+        tk.Label(cab, text="Accesible", font=("Segoe UI", 30, "bold"), fg=VERDE, bg=CREMA).pack(side="left")
         tk.Label(self.root, text="La información también se escucha",
-                 font=("Arial", 13, "italic"), fg=TEXTO, bg=CREMA).pack(pady=(0, 6))
+                 font=("Segoe UI", 13, "italic"), fg=TEXTO, bg=CREMA).pack(pady=(0, 6))
 
-        self.lbl_estado = tk.Label(self.root, text="", font=("Arial", 13, "bold"), fg=TEXTO, bg=CREMA)
+        self.lbl_estado = tk.Label(self.root, text="", font=("Segoe UI", 13, "bold"), fg=TEXTO, bg=CREMA)
         self.lbl_estado.pack(side="bottom", fill="x", pady=(0, 6))
 
         cuerpo = tk.Frame(self.root, bg=CREMA)
@@ -1857,7 +1877,7 @@ class EduAccesibleApp:
 
     def _pantalla_menu(self):
         f = tk.Frame(self.contenido, bg=CREMA)
-        tk.Label(f, text="¿Qué quieres hacer?", font=("Arial", 18, "bold"), fg=TEXTO, bg=CREMA).pack(pady=(5, 10))
+        tk.Label(f, text="¿Qué quieres hacer?", font=("Segoe UI", 18, "bold"), fg=TEXTO, bg=CREMA).pack(pady=(5, 10))
         opciones = [
             ("📖  1. Leer texto   ☝ 1 dedo", VERDE, "white", lambda: self.abrir_modo("texto")),
             ("🅰  2. Reconocer letras y palabras   ✌ 2 dedos", NARANJA, "white", lambda: self.abrir_modo("letras")),
@@ -1871,18 +1891,18 @@ class EduAccesibleApp:
             self.boton(f, texto, color, cmd, fg=fg, fuente=16).pack(fill="x", padx=20, pady=5, ipady=9)
         tk.Label(f, text="Otras señas: 👊 repetir · 👊👊 capturar · 🖐🖐 silencio · ☝☝ inicio · ✌✌ atrás · 👍 voz activa · 3+3 dedos ayuda. "
                          "Pregunta: «¿cuál es la seña de materiales?»",
-                 font=("Arial", 10, "bold"), fg=VERDE, bg=CREMA, wraplength=620).pack(pady=(4, 0))
+                 font=("Segoe UI", 10, "bold"), fg=VERDE, bg=CREMA, wraplength=620).pack(pady=(4, 0))
         tk.Label(f, text="Atajos: 1-7 elegir · C capturar · R repetir · V orden por voz · J señas · H voz siempre activa · I cambiar micrófono · L micrófono laptop · S silencio · M inicio · Esc atrás",
-                 font=("Arial", 10), fg=TEXTO, bg=CREMA).pack(pady=8)
+                 font=("Segoe UI", 10), fg=TEXTO, bg=CREMA).pack(pady=8)
         return f
 
     def _pantalla_modo(self):
         f = tk.Frame(self.contenido, bg=CREMA)
-        self.lbl_titulo_modo = tk.Label(f, text="", font=("Arial", 18, "bold"), fg=VERDE, bg=CREMA)
+        self.lbl_titulo_modo = tk.Label(f, text="", font=("Segoe UI", 18, "bold"), fg=VERDE, bg=CREMA)
         self.lbl_titulo_modo.pack(pady=(0, 6))
         self.video_label = tk.Label(f, bg="#000000", bd=2, relief="solid")
         self.video_label.pack()
-        self.lbl_resultado = tk.Label(f, text="", font=("Arial", 15), fg=TEXTO, bg=CREMA,
+        self.lbl_resultado = tk.Label(f, text="", font=("Segoe UI", 15), fg=TEXTO, bg=CREMA,
                                       wraplength=600, justify="left", height=5)
         self.lbl_resultado.pack(pady=(10, 4), fill="x")
         fila = tk.Frame(f, bg=CREMA)
@@ -1894,7 +1914,7 @@ class EduAccesibleApp:
 
     def _pantalla_ajustes(self):
         f = tk.Frame(self.contenido, bg=CREMA)
-        tk.Label(f, text="Ajustes", font=("Arial", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 8))
+        tk.Label(f, text="Ajustes", font=("Segoe UI", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 8))
         for texto, color, fg, cmd in [
             ("🔄  Cambiar cámara  (K)", VERDE, "white", self.cambiar_camara),
             ("📱  Teléfono: cámara y micrófono a la vez", NARANJA, "white", self.conectar_telefono_completo),
@@ -1918,28 +1938,28 @@ class EduAccesibleApp:
 
     def _pantalla_senas(self):
         f = tk.Frame(self.contenido, bg=CREMA)
-        tk.Label(f, text="Señas de mano", font=("Arial", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 4))
+        tk.Label(f, text="Señas de mano", font=("Segoe UI", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 4))
         tk.Label(f, text="Mantén la seña quieta 1 segundo. Pregunta: «¿cuál es la seña de ...?»",
-                 font=("Arial", 11), fg=TEXTO, bg=CREMA).pack()
+                 font=("Segoe UI", 11), fg=TEXTO, bg=CREMA).pack()
         marco = tk.Frame(f, bg=CREMA)
         marco.pack(fill="both", expand=True, padx=10, pady=6)
         scroll = tk.Scrollbar(marco)
         scroll.pack(side="right", fill="y")
-        self.txt_senas = tk.Text(marco, font=("Arial", 13), wrap="word", height=14, bg="white", fg=TEXTO,
+        self.txt_senas = tk.Text(marco, font=("Segoe UI", 13), wrap="word", height=14, bg="white", fg=TEXTO,
                                  relief="flat", yscrollcommand=scroll.set, state="disabled")
-        self.txt_senas.tag_configure("t", font=("Arial", 14, "bold"), foreground=VERDE)
+        self.txt_senas.tag_configure("t", font=("Segoe UI", 14, "bold"), foreground=VERDE)
         self.txt_senas.pack(side="left", fill="both", expand=True)
         scroll.config(command=self.txt_senas.yview)
         return f
 
     def _pantalla_materiales(self):
         f = tk.Frame(self.contenido, bg=CREMA)
-        tk.Label(f, text="Materiales guardados", font=("Arial", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 6))
+        tk.Label(f, text="Materiales guardados", font=("Segoe UI", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 6))
         marco = tk.Frame(f, bg=CREMA)
         marco.pack(fill="both", expand=True, padx=10)
         scroll = tk.Scrollbar(marco)
         scroll.pack(side="right", fill="y")
-        self.lista = tk.Listbox(marco, font=("Arial", 13), yscrollcommand=scroll.set, height=12,
+        self.lista = tk.Listbox(marco, font=("Segoe UI", 13), yscrollcommand=scroll.set, height=12,
                                 selectbackground=VERDE)
         self.lista.pack(side="left", fill="both", expand=True)
         scroll.config(command=self.lista.yview)
@@ -2620,11 +2640,19 @@ class EduAccesibleApp:
     # ---- gestos en su propio hilo (así la ventana no se pega)
     def _bucle_gestos(self):
         t0, cuenta = time.time(), 0
+        ultimo = 0.0
         while True:
             self._ev_gestos.wait()
             self._ev_gestos.clear()
             if not self.gestos_activos:
                 continue
+            # Ahorro de procesador: con una mano a la vista se analiza ~15 veces por segundo (de sobra para una seña
+            # que se mantiene 1,2 s); sin manos, ~6 veces por segundo, y se acelera apenas aparece una.
+            espera = 0.066 if (self.gestos.todas or self._visto) else 0.16
+            falta = ultimo + espera - time.time()
+            if falta > 0:
+                time.sleep(falta)
+            ultimo = time.time()
             try:
                 self._visto = self.gestos.leer(self._frame_gestos)
                 g = self.gestos.actualizar(self._visto, time.time())
@@ -2858,7 +2886,7 @@ class EduAccesibleApp:
         # En paralelo con el OCR (antes esperaba a que el OCR terminara + 2 s): la voz es la entrada principal de la
         # app y debe estar lista cuanto antes. Corre en su propio hilo, así que no frena la ventana.
         self.mic.preparar(lambda t: self.voz.hablar(t))
-        if leer_config().get("voz_continua") and self.mic.modelo is not None:
+        if leer_config().get("voz_continua", True) and self.mic.modelo is not None:
             self.ui(lambda: self.alternar_voz_continua(True, silencioso=True))
 
     def _asegurar_detector(self):

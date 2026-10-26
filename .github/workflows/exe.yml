@@ -36,12 +36,14 @@ jobs:
           python -m PyInstaller --noconfirm --clean --onedir --noconsole --name EduAccesible
           --collect-all mediapipe --collect-all rapidocr_onnxruntime --collect-all vosk --collect-all onnxruntime --collect-all pypdfium2 --collect-all docx
           --collect-submodules win32com --hidden-import pythoncom --hidden-import win32timezone
-          --hidden-import pyttsx3.drivers --hidden-import pyttsx3.drivers.sapi5 app.py
+          --hidden-import pyttsx3.drivers --hidden-import pyttsx3.drivers.sapi5
+          --icon logo.ico --exclude-module IPython --exclude-module pytest --exclude-module notebook --exclude-module tkinter.test app.py
       - name: Meter Tesseract y los modelos dentro del programa
         shell: pwsh
         run: |
           Copy-Item "C:\Program Files\Tesseract-OCR" dist\EduAccesible\tesseract -Recurse
           Copy-Item modelos dist\EduAccesible\modelos -Recurse
+          Copy-Item logo.ico dist\EduAccesible\logo.ico
       - name: Crear el instalador
         shell: pwsh
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" instalador.iss'

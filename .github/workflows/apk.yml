@@ -21,6 +21,7 @@ jobs:
           cp flutter/pubspec.yaml build_app/pubspec.yaml
           rm -rf build_app/lib && cp -r flutter/lib build_app/lib
           rm -rf build_app/test
+          rm -rf build_app/assets && cp -r flutter/assets build_app/assets
           python3 - <<'PY'
           import re, glob
           m = "build_app/android/app/src/main/AndroidManifest.xml"
@@ -30,6 +31,7 @@ jobs:
                   '<uses-permission android:name="android.permission.INTERNET"/>\n'
                   '<queries><intent><action android:name="android.speech.RecognitionService"/></intent></queries>\n')
           s = s.replace("<application", perm + "<application", 1)
+          s = re.sub(r'android:label="[^"]*"', 'android:label="EduAccesible"', s, count=1)
           open(m, "w", encoding="utf-8").write(s)
           for g in glob.glob("build_app/android/app/build.gradle*"):
               t = open(g, encoding="utf-8").read()
@@ -52,8 +54,9 @@ jobs:
         working-directory: build_app
         run: |
           flutter pub get
-          flutter build apk --release
+          dart run flutter_launcher_icons || echo "No se pudo poner el icono; se sigue sin él"
+          flutter build apk --release --split-per-abi
       - uses: actions/upload-artifact@v4
         with:
           name: EduAccesible-apk
-          path: build_app/build/app/outputs/flutter-apk/app-release.apk
+          path: build_app/build/app/outputs/flutter-apk/*-release.apk

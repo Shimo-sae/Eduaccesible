@@ -102,18 +102,31 @@ String? combinarManos(List<String?> gestos) {
   return senas.containsKey(g) ? g : null;
 }
 
-/// Estabilizador: ejecuta una seña solo si se mantuvo ~[hold] segundos en casi toda la ventana, y hay que soltarla
-/// antes de que vuelva a valer. Llama a [actualizar] con cada cuadro (gesto o null).
+/// Estabilizador: ejecuta una seña solo si se mantuvo ~[hold] segundos en casi toda la ventana, con la mano quieta,
+/// y hay que soltarla antes de que vuelva a valer. Llama a [actualizar] con cada cuadro (seña o null).
+/// [meta] = [centro x, centro y, largo de palma] de las manos que hacen la seña.
 class Estabilizador {
-  final double hold, enfriar;
-  Estabilizador({this.hold = 1.2, this.enfriar = 2.5});
-  final List<(double, String?)> _m = [];
+  final double hold, enfriar, maxMov;
+  Estabilizador({this.hold = 1.2, this.enfriar = 2.5, this.maxMov = 0.9});
+  final List<(double, String?, List<double>?)> _m = [];
   final List<String?> _ultimas = [];
   double _bloqueadoHasta = 0;
   String? _desarmado;
+  String? dominante;
+  double progreso = 0;
+  String nota = '';
 
-  String? actualizar(String? g, double ahora) {
-    _m.add((ahora, g));
+  bool _quieta(String g) {
+    final metas = [for (final e in _m) if (e.$2 == g && e.$3 != null) e.$3!];
+    if (metas.length < 2) return true;
+    final xs = metas.map((m) => m[0]), ys = metas.map((m) => m[1]);
+    final tam = metas.map((m) => m[2]).reduce((a, b) => a + b) / metas.length;
+    final mov = math.max(xs.reduce(math.max) - xs.reduce(math.min), ys.reduce(math.max) - ys.reduce(math.min));
+    return mov <= maxMov * tam;
+  }
+
+  String? actualizar(String? g, double ahora, [List<double>? meta]) {
+    _m.add((ahora, g, g == null ? null : meta));
     while (_m.isNotEmpty && ahora - _m.first.$1 > hold) {
       _m.removeAt(0);
     }
@@ -123,6 +136,9 @@ class Estabilizador {
       final ajenos = _ultimas.where((x) => x != _desarmado).length;
       if (_ultimas.length >= 6 && ajenos >= 5) _desarmado = null;
     }
+    dominante = null;
+    progreso = 0;
+    nota = '';
     final cuenta = <String, int>{};
     for (final e in _m) {
       if (e.$2 != null) cuenta[e.$2!] = (cuenta[e.$2!] ?? 0) + 1;
@@ -130,8 +146,16 @@ class Estabilizador {
     if (cuenta.isEmpty) return null;
     final mejor = cuenta.entries.reduce((a, b) => a.value >= b.value ? a : b);
     final span = ahora - _m.first.$1;
-    if (mejor.value / _m.length >= 0.8 && span >= hold * 0.9 && _m.length >= 6 &&
-        ahora >= _bloqueadoHasta && mejor.key != _desarmado) {
+    final frac = mejor.value / _m.length;
+    if (frac < 0.8) return null;
+    dominante = mejor.key;
+    final quieta = _quieta(mejor.key);
+    if (!quieta) {
+      nota = 'mantén la mano quieta';
+      return null;
+    }
+    progreso = math.min(1.0, span / (hold * 0.9)) * math.min(1.0, frac);
+    if (span >= hold * 0.9 && _m.length >= 6 && ahora >= _bloqueadoHasta && mejor.key != _desarmado) {
       _m.clear();
       _ultimas.clear();
       _bloqueadoHasta = ahora + enfriar;
@@ -161,12 +185,15 @@ class _O {
 // Se revisa en este orden: lo más específico primero.
 const List<_O> _ordenes = [
   _O(['ayuda de senas', 'lista de senas', 'que senas hay', 'todas las senas', 'senas', 'ayuda'], 'senas_lista'),
+  _O(['configurar botones', 'botones laterales', 'cambiar botones', 'editar botones', 'botones'], 'botones'),
   _O(['desactivar voz', 'apagar voz', 'dejar de escuchar', 'modo manual'], 'voz_off'),
   _O(['activar voz', 'voz activa', 'voz siempre activa', 'escuchar siempre', 'modo voz'], 'voz_on'),
   _O(['desactivar gestos', 'apagar gestos', 'quitar gestos', 'sin gestos'], 'gestos_off'),
   _O(['activar gestos', 'activa gestos', 'gestos', 'gesto'], 'gestos_on'),
+  _O(['cambiar camara', 'otra camara', 'siguiente camara', 'camara', 'camaras'], 'camara'),
   _O(['ajustes', 'configuracion', 'dispositivos'], 'ajustes'),
-  _O(['importar', 'subir imagen', 'abrir imagen', 'imagen'], 'importar'),
+  _O(['wifi', 'wi fi', 'recibir', 'red'], 'wifi'),
+  _O(['importar', 'subir imagen', 'abrir imagen', 'imagen', 'documento', 'archivo', 'pdf', 'word'], 'importar'),
   _O(['materiales', 'guardados'], 'materiales'),
   _O(['contar', 'objetos', 'cuantos'], 'm_objetos'),
   _O(['figuras', 'geometricas', 'formas'], 'm_figuras'),

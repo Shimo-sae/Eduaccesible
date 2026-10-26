@@ -43,9 +43,9 @@ jobs:
           for g in glob.glob("build_app/android/app/build.gradle*"):
               t = open(g, encoding="utf-8").read()
               if g.endswith(".kts"):
-                  t = re.sub(r"(buildTypes\s*\{\s*release\s*\{)", r'\1\n            proguardFiles("proguard-rules.pro")', t, count=1)
+                  t = re.sub(r"(buildTypes\s*\{\s*release\s*\{)", r'\1\n            proguardFiles("proguard-rules.pro")\n            isMinifyEnabled = false\n            isShrinkResources = false', t, count=1)
               else:
-                  t = re.sub(r"(buildTypes\s*\{\s*release\s*\{)", r"\1\n            proguardFiles 'proguard-rules.pro'", t, count=1)
+                  t = re.sub(r"(buildTypes\s*\{\s*release\s*\{)", r"\1\n            proguardFiles 'proguard-rules.pro'\n            minifyEnabled false\n            shrinkResources false", t, count=1)
               open(g, "w", encoding="utf-8").write(t)
           PY
       - name: Compilar el APK

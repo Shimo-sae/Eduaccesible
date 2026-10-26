@@ -88,6 +88,7 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CARPETA_DEBUG = os.path.join(BASE_DIR, "debug")
 CARPETA_MATERIALES = os.path.join(BASE_DIR, "materiales")
+CARPETA_ENTRADA = os.path.join(BASE_DIR, "entrada")
 os.makedirs(CARPETA_DEBUG, exist_ok=True)
 CARPETA_MODELOS = os.path.join(BASE_DIR, "modelos")
 RUTA_CONFIG = os.path.join(BASE_DIR, "config.json")
@@ -98,6 +99,7 @@ RES_CAMARA = (1280, 720)
 # más retraso causa). Es opcional: si el teléfono no acepta el cambio, se ignora. Pon None para no tocar nada.
 AJUSTE_IP_WEBCAM = {"video_size": "1280x720", "quality": "60"}
 os.makedirs(CARPETA_MATERIALES, exist_ok=True)
+os.makedirs(CARPETA_ENTRADA, exist_ok=True)
 os.makedirs(CARPETA_MODELOS, exist_ok=True)
 
 # Colores del diseño EduAccesible
@@ -978,6 +980,7 @@ ORDENES = [
     (("cambiar camara", "otra camara", "siguiente camara", "camara", "camaras"), "camara"),
     (("audifonos", "salida de audio", "cambiar audio", "audio"), "audio"),
     (("ajustes", "configuracion", "dispositivos"), "ajustes"),
+    (("documento", "archivo", "pdf", "word"), "importar_doc"),
     (("importar", "subir imagen", "abrir imagen", "imagen"), "importar"),
     (("materiales", "guardados"), "materiales"),
     (("contar", "objetos", "cuantos"), "m_objetos"),
@@ -1060,7 +1063,7 @@ GRAMATICA = ["capturar", "captura", "foto", "tomar", "escanear", "atrás", "volv
              "otra cámara", "teléfono", "celular", "cámara del teléfono", "audio", "audífonos", "cambiar audio",
              "micrófono del teléfono", "micrófono del celular", "micrófono de la laptop", "micrófono del computador",
              "micrófono", "activar gestos", "desactivar gestos", "apagar gestos", "activar voz", "desactivar voz",
-             "apagar voz", "dejar de escuchar", "escuchar siempre", "voz siempre activa", "modo voz", "gestos", "importar", "imagen", "importar imagen",
+             "apagar voz", "dejar de escuchar", "escuchar siempre", "voz siempre activa", "modo voz", "gestos", "importar", "imagen", "importar imagen", "documento", "importar documento", "abrir documento", "archivo", "pdf", "word",
              "ayuda", "señas", "lista de señas", "qué señas hay", "ayuda de señas", "seña de voz", "seña de ayuda",
              "[unk]"]
 # Preguntas "¿cuál es la seña de ...?" para cada cosa que tiene seña (con tildes, como en el modelo de voz)
@@ -1789,6 +1792,8 @@ class EduAccesibleApp:
 
         self.actualizar_video()
         self._bombear_ui()
+        self._entrada_vista = set(os.listdir(CARPETA_ENTRADA))  # lo que ya estaba no se vuelve a leer
+        self.root.after(4000, self.vigilar_entrada)
         self.voz.hablar("EduAccesible iniciado. Elige una función en el menú.")
         # La cámara se abre en segundo plano: antes la ventana no aparecía hasta que terminaba (hasta 5 s si la
         # última cámara era la del teléfono y no respondía).
@@ -1878,7 +1883,8 @@ class EduAccesibleApp:
         self.lbl_resultado.pack(pady=(10, 4), fill="x")
         fila = tk.Frame(f, bg=CREMA)
         fila.pack(pady=4)
-        self.boton(fila, "🖼 Importar imagen", NARANJA, self.importar_imagen, fuente=12).pack(side="left", padx=5, ipady=6, ipadx=12)
+        self.boton(fila, "🖼 Imagen", NARANJA, self.importar_imagen, fuente=12).pack(side="left", padx=5, ipady=6, ipadx=12)
+        self.boton(fila, "📄 Documento", NARANJA, self.importar_documento, fuente=12).pack(side="left", padx=5, ipady=6, ipadx=12)
         self.boton(fila, "🎤 Hablar (V)", VERDE, self.escuchar_orden, fuente=12).pack(side="left", padx=5, ipady=6, ipadx=12)
         return f
 
@@ -1937,8 +1943,11 @@ class EduAccesibleApp:
         fila = tk.Frame(f, bg=CREMA)
         fila.pack(pady=8)
         self.boton(fila, "🔊 Escuchar", VERDE, self.escuchar_material, fuente=12).grid(row=0, column=0, padx=5, ipady=6, ipadx=6)
-        self.boton(fila, "🖼 Importar imagen", NARANJA, self.importar_imagen, fuente=12).grid(row=0, column=1, padx=5, ipady=6, ipadx=6)
-        self.boton(fila, "📂 Abrir carpeta", AMARILLO, self.abrir_carpeta, fg=TEXTO, fuente=12).grid(row=0, column=2, padx=5, ipady=6, ipadx=6)
+        self.boton(fila, "🖼 Imagen", NARANJA, self.importar_imagen, fuente=12).grid(row=0, column=1, padx=5, ipady=6, ipadx=6)
+        self.boton(fila, "📄 Documento", NARANJA, self.importar_documento, fuente=12).grid(row=0, column=2, padx=5, ipady=6, ipadx=6)
+        self.boton(fila, "📂 Materiales", AMARILLO, self.abrir_carpeta, fg=TEXTO, fuente=12).grid(row=1, column=0, padx=5, pady=4, ipady=6, ipadx=6)
+        self.boton(fila, "📥 Entrada", AMARILLO, self.abrir_entrada, fg=TEXTO, fuente=12).grid(row=1, column=1, padx=5, pady=4, ipady=6, ipadx=6)
+        self.boton(fila, "💾 Guardar/copiar texto", AMARILLO, self.compartir_texto, fg=TEXTO, fuente=12).grid(row=1, column=2, padx=5, pady=4, ipady=6, ipadx=6)
         return f
 
     def mostrar(self, nombre):
@@ -2353,7 +2362,7 @@ class EduAccesibleApp:
              "mic_telefono": self.conectar_mic_telefono,
              "mic_laptop": self.usar_mic_laptop,
              "mic_cambiar": self.cambiar_microfono,
-             "voz_on": lambda: self.alternar_voz_continua(True), "voz_off": lambda: self.alternar_voz_continua(False), "ajustes": self.abrir_ajustes, "importar": self.importar_imagen,
+             "voz_on": lambda: self.alternar_voz_continua(True), "voz_off": lambda: self.alternar_voz_continua(False), "ajustes": self.abrir_ajustes, "importar": self.importar_imagen, "importar_doc": self.importar_documento,
              "materiales": self.abrir_materiales, "capturar": self.capturar, "repetir": self.repetir,
              "silencio": self.voz.detener, "inicio": self.ir_inicio, "atras": self.atras,
              "senas_lista": self.abrir_senas}[orden]()
@@ -2920,6 +2929,100 @@ class EduAccesibleApp:
         modo = self.modo_actual if self.pantalla == "modo" else "texto"
         self.lanzar_analisis(frame, modo)
 
+    def importar_documento(self):
+        ruta = filedialog.askopenfilename(
+            title="Importar documento",
+            filetypes=[("Documentos e imágenes", "*.pdf *.docx *.txt *.md *.csv *.png *.jpg *.jpeg *.bmp"),
+                       ("Documentos", "*.pdf *.docx *.txt *.md *.csv"), ("Todos", "*.*")])
+        if ruta:
+            self.abrir_archivo(ruta)
+
+    def abrir_archivo(self, ruta):
+        ext = os.path.splitext(ruta)[1].lower()
+        if ext in EXT_IMG:
+            frame = cv2.imdecode(np.fromfile(ruta, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                self.voz.hablar("No se pudo abrir la imagen.")
+                return
+            self.lanzar_analisis(frame, self.modo_actual if self.pantalla == "modo" else "texto")
+            return
+        if ext not in EXT_DOC:
+            self.voz.hablar("Ese tipo de archivo no es compatible. Usa PDF, Word, texto o imagen.")
+            return
+        if self.procesando:
+            return
+        self.procesando = True
+        self.voz.hablar("Abriendo el documento.")
+        self.lbl_resultado.config(text="Abriendo el documento...")
+        self._gen_analisis = self._gen
+        threading.Thread(target=self._leer_doc_hilo, args=(ruta,), daemon=True).start()
+
+    def _leer_doc_hilo(self, ruta):
+        try:
+            def ocr_pag(bgr):
+                if not self.ocr.listo.wait(60):
+                    return ""
+                return self._leer(bgr, (6, 3))
+
+            def prog(i, n):
+                self.ui(lambda: self.lbl_resultado.config(text=f"Leyendo página {i} de {n}..."))
+
+            texto = leer_documento(ruta, ocr_pag, prog)
+            if not texto:
+                self.anunciar("No encontré texto en este documento.")
+                return
+            if self._gen_analisis is not None and self._gen_analisis != self._gen:
+                return
+            self.ultimo_audio = texto
+            self.ui(lambda: self.lbl_resultado.config(text=texto[:600] + ("..." if len(texto) > 600 else "")))
+            for t in trozos_voz(texto):
+                self.voz.hablar(t)
+            self.guardar_material("documento", texto)
+        except Exception as e:
+            print(f"Error al leer documento: {e}")
+            self.anunciar(f"No pude abrir el documento. {e}" if isinstance(e, ValueError) else "No pude abrir el documento. Puede estar dañado.")
+        finally:
+            self._gen_analisis = None
+            self.ui(self._terminar)
+
+    def vigilar_entrada(self):
+        """Conexión con dispositivos: todo archivo que se copie a la carpeta Entrada se recibe y se guarda en Materiales."""
+        try:
+            for a in os.listdir(CARPETA_ENTRADA):
+                ruta = os.path.join(CARPETA_ENTRADA, a)
+                if not os.path.isfile(ruta) or a in self._entrada_vista or not a.lower().endswith(EXT_DOC + EXT_IMG):
+                    continue
+                if time.time() - os.path.getmtime(ruta) < 2:  # aún se está copiando
+                    continue
+                self._entrada_vista.add(a)
+                self.voz.hablar(f"Llegó un archivo: {os.path.splitext(a)[0]}. Se abrirá ahora." if self.pantalla != "modo" or not self.procesando else f"Llegó un archivo: {a}.")
+                if not self.procesando:
+                    self.abrir_archivo(ruta)
+        except OSError:
+            pass
+        self.root.after(3000, self.vigilar_entrada)
+
+    def abrir_entrada(self):
+        try:
+            os.startfile(CARPETA_ENTRADA)
+        except Exception:
+            messagebox.showinfo("Entrada", f"Carpeta: {CARPETA_ENTRADA}")
+
+    def compartir_texto(self):
+        t = getattr(self, "ultimo_audio", "") or ""
+        if not t:
+            self.voz.hablar("Todavía no hay nada para compartir.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(t)
+        ruta = filedialog.asksaveasfilename(title="Guardar texto leído", defaultextension=".txt", filetypes=[("Texto", "*.txt")])
+        if ruta:
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write(t)
+            self.voz.hablar("Texto guardado.")
+        else:
+            self.voz.hablar("Texto copiado. Puedes pegarlo en otro programa.")
+
     def abrir_carpeta(self):
         try:
             os.startfile(CARPETA_MATERIALES)
@@ -2937,6 +3040,116 @@ class EduAccesibleApp:
         self.mic.cerrar_red()
         self.voz.cerrar()
         self.root.destroy()
+
+
+
+# ---------------------------------------------------------------------------
+# Documentos (PDF, Word, texto)
+# ---------------------------------------------------------------------------
+EXT_TEXTO = (".txt", ".md", ".csv")
+EXT_DOC = EXT_TEXTO + (".pdf", ".docx")
+EXT_IMG = (".png", ".jpg", ".jpeg", ".bmp")
+
+
+def _limpiar_doc(t):
+    lineas = [" ".join(l.split()) for l in t.replace("\r", "\n").split("\n")]
+    out, vacias = [], 0
+    for l in lineas:
+        if l:
+            out.append(l)
+            vacias = 0
+        else:
+            vacias += 1
+            if vacias == 1 and out:
+                out.append("")
+    return "\n".join(out).strip()
+
+
+def leer_docx(ruta):
+    import docx
+    d = docx.Document(ruta)
+    partes = [p.text for p in d.paragraphs]
+    for tabla in d.tables:
+        for fila in tabla.rows:
+            celdas = []
+            for c in fila.cells:
+                if c.text.strip() and c.text.strip() not in celdas:
+                    celdas.append(c.text.strip())
+            if celdas:
+                partes.append(", ".join(celdas))
+    return _limpiar_doc("\n".join(partes))
+
+
+def leer_texto_plano(ruta):
+    datos = open(ruta, "rb").read()
+    for cod in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return _limpiar_doc(datos.decode(cod))
+        except UnicodeDecodeError:
+            continue
+    return ""
+
+
+def leer_pdf(ruta, ocr_pagina=None, max_ocr=40, progreso=None):
+    """Texto del PDF. Si una página no tiene texto (escaneada) usa ocr_pagina(imagen BGR)."""
+    from pypdf import PdfReader
+    lector = PdfReader(ruta)
+    if lector.is_encrypted:
+        try:
+            lector.decrypt("")
+        except Exception:
+            raise ValueError("El PDF está protegido con contraseña.")
+    paginas, usados = [], 0
+    total = len(lector.pages)
+    pdfium = None
+    for i, pag in enumerate(lector.pages):
+        if progreso:
+            progreso(i + 1, total)
+        try:
+            t = (pag.extract_text() or "").strip()
+        except Exception:
+            t = ""
+        if len(t) < 15 and ocr_pagina is not None and usados < max_ocr:
+            try:
+                import pypdfium2 as pdfium_mod
+                if pdfium is None:
+                    pdfium = pdfium_mod.PdfDocument(ruta)
+                img = pdfium[i].render(scale=2.2).to_numpy()
+                bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img.shape[2] == 3 else cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+                t = (ocr_pagina(bgr) or "").strip()
+                usados += 1
+            except Exception as e:
+                print(f"OCR de página {i + 1} falló: {e}")
+        if t:
+            paginas.append(t)
+    return _limpiar_doc("\n\n".join(paginas))
+
+
+def leer_documento(ruta, ocr_pagina=None, progreso=None):
+    ext = os.path.splitext(ruta)[1].lower()
+    if ext == ".pdf":
+        return leer_pdf(ruta, ocr_pagina, progreso=progreso)
+    if ext == ".docx":
+        return leer_docx(ruta)
+    if ext in EXT_TEXTO:
+        return leer_texto_plano(ruta)
+    raise ValueError("Formato no compatible. Usa PDF, Word (.docx), .txt o imagen.")
+
+
+def trozos_voz(texto, tam=900):
+    """Parte un texto largo por frases para leerlo sin cortes."""
+    out, actual = [], ""
+    for frase in texto.replace("\n", " \n ").split(". "):
+        frase = frase.strip()
+        if not frase:
+            continue
+        if len(actual) + len(frase) > tam and actual:
+            out.append(actual)
+            actual = ""
+        actual += frase + ". "
+    if actual.strip():
+        out.append(actual.strip())
+    return out
 
 
 def diagnostico():

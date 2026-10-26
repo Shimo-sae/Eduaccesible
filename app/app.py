@@ -980,6 +980,8 @@ ORDENES = [
     (("cambiar camara", "otra camara", "siguiente camara", "camara", "camaras"), "camara"),
     (("audifonos", "salida de audio", "cambiar audio", "audio"), "audio"),
     (("ajustes", "configuracion", "dispositivos"), "ajustes"),
+    (("wifi", "wi fi", "recibir archivos", "recibir por"), "wifi"),
+    (("wifi", "wi fi", "recibir", "red"), "wifi"),
     (("documento", "archivo", "pdf", "word"), "importar_doc"),
     (("importar", "subir imagen", "abrir imagen", "imagen"), "importar"),
     (("materiales", "guardados"), "materiales"),
@@ -1063,7 +1065,7 @@ GRAMATICA = ["capturar", "captura", "foto", "tomar", "escanear", "atrás", "volv
              "otra cámara", "teléfono", "celular", "cámara del teléfono", "audio", "audífonos", "cambiar audio",
              "micrófono del teléfono", "micrófono del celular", "micrófono de la laptop", "micrófono del computador",
              "micrófono", "activar gestos", "desactivar gestos", "apagar gestos", "activar voz", "desactivar voz",
-             "apagar voz", "dejar de escuchar", "escuchar siempre", "voz siempre activa", "modo voz", "gestos", "importar", "imagen", "importar imagen", "documento", "importar documento", "abrir documento", "archivo", "pdf", "word",
+             "apagar voz", "dejar de escuchar", "escuchar siempre", "voz siempre activa", "modo voz", "gestos", "importar", "imagen", "importar imagen", "wifi", "recibir archivos", "wifi", "recibir archivos", "documento", "importar documento", "abrir documento", "archivo", "pdf", "word",
              "ayuda", "señas", "lista de señas", "qué señas hay", "ayuda de señas", "seña de voz", "seña de ayuda",
              "[unk]"]
 # Preguntas "¿cuál es la seña de ...?" para cada cosa que tiene seña (con tildes, como en el modelo de voz)
@@ -1792,6 +1794,8 @@ class EduAccesibleApp:
 
         self.actualizar_video()
         self._bombear_ui()
+        self.wifi = None
+        self.wifi = ServidorWifi(CARPETA_ENTRADA)
         self._entrada_vista = set(os.listdir(CARPETA_ENTRADA))  # lo que ya estaba no se vuelve a leer
         self.root.after(4000, self.vigilar_entrada)
         self.voz.hablar("EduAccesible iniciado. Elige una función en el menú.")
@@ -1946,8 +1950,9 @@ class EduAccesibleApp:
         self.boton(fila, "🖼 Imagen", NARANJA, self.importar_imagen, fuente=12).grid(row=0, column=1, padx=5, ipady=6, ipadx=6)
         self.boton(fila, "📄 Documento", NARANJA, self.importar_documento, fuente=12).grid(row=0, column=2, padx=5, ipady=6, ipadx=6)
         self.boton(fila, "📂 Materiales", AMARILLO, self.abrir_carpeta, fg=TEXTO, fuente=12).grid(row=1, column=0, padx=5, pady=4, ipady=6, ipadx=6)
-        self.boton(fila, "📥 Entrada", AMARILLO, self.abrir_entrada, fg=TEXTO, fuente=12).grid(row=1, column=1, padx=5, pady=4, ipady=6, ipadx=6)
+        self.boton(fila, "📶 Recibir por Wi-Fi", VERDE, self.alternar_wifi, fuente=12).grid(row=1, column=1, padx=5, pady=4, ipady=6, ipadx=6)
         self.boton(fila, "💾 Guardar/copiar texto", AMARILLO, self.compartir_texto, fg=TEXTO, fuente=12).grid(row=1, column=2, padx=5, pady=4, ipady=6, ipadx=6)
+        self.boton(fila, "📶 Recibir por Wi-Fi", VERDE, self.alternar_wifi, fuente=12).grid(row=2, column=0, columnspan=3, pady=4, ipady=6, ipadx=10)
         return f
 
     def mostrar(self, nombre):
@@ -2362,7 +2367,7 @@ class EduAccesibleApp:
              "mic_telefono": self.conectar_mic_telefono,
              "mic_laptop": self.usar_mic_laptop,
              "mic_cambiar": self.cambiar_microfono,
-             "voz_on": lambda: self.alternar_voz_continua(True), "voz_off": lambda: self.alternar_voz_continua(False), "ajustes": self.abrir_ajustes, "importar": self.importar_imagen, "importar_doc": self.importar_documento,
+             "voz_on": lambda: self.alternar_voz_continua(True), "voz_off": lambda: self.alternar_voz_continua(False), "ajustes": self.abrir_ajustes, "importar": self.importar_imagen, "importar_doc": self.importar_documento, "wifi": self.alternar_wifi, "wifi": self.alternar_wifi,
              "materiales": self.abrir_materiales, "capturar": self.capturar, "repetir": self.repetir,
              "silencio": self.voz.detener, "inicio": self.ir_inicio, "atras": self.atras,
              "senas_lista": self.abrir_senas}[orden]()
@@ -3002,6 +3007,43 @@ class EduAccesibleApp:
             pass
         self.root.after(3000, self.vigilar_entrada)
 
+    def alternar_wifi(self):
+        if self.wifi is None:
+            self.wifi = ServidorWifi(CARPETA_ENTRADA)
+        if self.wifi.activo():
+            self.wifi.detener()
+            self.voz.hablar("Recepción por Wi-Fi apagada.")
+            self.lbl_resultado.config(text="Recepción por Wi-Fi apagada.") if hasattr(self, "lbl_resultado") else None
+            return
+        try:
+            self.wifi.iniciar()
+        except OSError as e:
+            self.voz.hablar("No se pudo activar el Wi-Fi. Puede estar ocupado.")
+            messagebox.showerror("Wi-Fi", f"No se pudo activar: {e}")
+            return
+        d = self.wifi.direccion()
+        self.voz.hablar(f"Recepción por Wi-Fi activada. Desde el celular, conectado a la misma red, abre la dirección que aparece en pantalla. El código es {' '.join(self.wifi.clave)}.")
+        messagebox.showinfo("Recibir por Wi-Fi",
+                            f"El celular debe estar en la MISMA red Wi-Fi.\n\nAbre en su navegador:\n\n{d}\n\nY elige el archivo. "
+                            "Llegará solo y se leerá en voz alta.\n\n(Si Windows pregunta por el firewall, pulsa Permitir.)")
+
+    def alternar_wifi(self):
+        if self.wifi.activo():
+            self.wifi.detener()
+            self.voz.hablar("Recepción por Wi-Fi apagada.")
+            self.lbl_resultado.config(text="Recepción por Wi-Fi apagada.")
+            return
+        try:
+            self.wifi.iniciar()
+        except OSError as e:
+            self.voz.hablar("No se pudo activar el Wi-Fi. Puede que el puerto esté ocupado.")
+            print(e)
+            return
+        c = " ".join(self.wifi.codigo)
+        t = f"Para enviar archivos, abre en el celular la dirección {self.wifi.url} y escribe el código {self.wifi.codigo}."
+        self.lbl_resultado.config(text=t)
+        self.voz.hablar(f"Recepción por Wi-Fi activa. En el celular, conectado a la misma red, abre el navegador y escribe {self.wifi.url.replace('http://', '').replace('.', ' punto ').replace(':', ' dos puntos ')}. El código es {c}.")
+
     def abrir_entrada(self):
         try:
             os.startfile(CARPETA_ENTRADA)
@@ -3038,7 +3080,10 @@ class EduAccesibleApp:
         if cap is not None and parado:  # soltar la cámara con el hilo aún leyendo puede cerrar el programa de golpe
             cap.release()
         self.mic.cerrar_red()
+        self.wifi.detener()
         self.voz.cerrar()
+        if self.wifi:
+            self.wifi.detener()
         self.root.destroy()
 
 
@@ -3150,6 +3195,209 @@ def trozos_voz(texto, tam=900):
     if actual.strip():
         out.append(actual.strip())
     return out
+
+
+# ---------------------------------------------------------------------------
+# Recibir archivos por Wi-Fi (el celular abre una página y sube el archivo)
+# ---------------------------------------------------------------------------
+PAGINA_WIFI = """<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EduAccesible</title><style>body{font-family:Arial;background:#FAF6EB;color:#2B2650;text-align:center;padding:24px}
+h1{color:#895DCA}button,label{display:block;margin:18px auto;padding:20px;font-size:22px;border-radius:14px;background:#895DCA;color:#fff;border:0;max-width:420px}
+#m{font-size:20px;margin-top:20px}</style></head><body><h1>EduAccesible</h1><p>Elige un PDF, Word, texto o imagen para enviarlo al dispositivo.</p>
+<label>Elegir archivo<input id="f" type="file" style="display:none" accept=".pdf,.docx,.txt,.md,.csv,.png,.jpg,.jpeg,.bmp"></label>
+<div id="m"></div><script>
+const k=new URLSearchParams(location.search).get('k')||'';
+document.getElementById('f').onchange=async e=>{const f=e.target.files[0];if(!f)return;const m=document.getElementById('m');m.textContent='Enviando...';
+try{const r=await fetch('/subir?k='+encodeURIComponent(k)+'&nombre='+encodeURIComponent(f.name),{method:'POST',body:f});m.textContent=r.ok?'Enviado: '+f.name:'No se pudo enviar ('+(await r.text())+')';}catch(x){m.textContent='Error de conexión'}};
+</script></body></html>"""
+
+
+def ip_local():
+    import socket
+    try:
+        t = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        t.connect(("8.8.8.8", 80))
+        ip = t.getsockname()[0]
+        t.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
+class ServidorWifi:
+    MAX = 60 * 1024 * 1024
+
+    def __init__(self, carpeta, al_recibir=None):
+        self.carpeta, self.al_recibir = carpeta, al_recibir
+        self.httpd, self.clave, self.puerto = None, "", 8765
+
+    def activo(self):
+        return self.httpd is not None
+
+    def direccion(self):
+        return f"http://{ip_local()}:{self.puerto}/?k={self.clave}"
+
+    def iniciar(self):
+        import http.server
+        import random
+        import re as _re
+        self.clave = f"{random.randint(0, 9999):04d}"
+        dueno = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _resp(self, code, texto, tipo="text/plain; charset=utf-8"):
+                b = texto.encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", tipo)
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+            def do_GET(self):
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                if q.get("k", [""])[0] != dueno.clave:
+                    return self._resp(403, "Código incorrecto. Usa la dirección que muestra el dispositivo.")
+                self._resp(200, PAGINA_WIFI, "text/html; charset=utf-8")
+
+            def do_POST(self):
+                u = urllib.parse.urlparse(self.path)
+                q = urllib.parse.parse_qs(u.query)
+                if u.path != "/subir" or q.get("k", [""])[0] != dueno.clave:
+                    return self._resp(403, "código incorrecto")
+                n = int(self.headers.get("Content-Length") or 0)
+                if n <= 0 or n > dueno.MAX:
+                    return self._resp(413, "archivo vacío o demasiado grande")
+                nombre = os.path.basename(q.get("nombre", ["archivo"])[0]).replace("\\", "_")
+                nombre = _re.sub(r"[^\w .\-áéíóúüñÁÉÍÓÚÜÑ]", "_", nombre)[:120] or "archivo"
+                if not nombre.lower().endswith(EXT_DOC + EXT_IMG):
+                    return self._resp(415, "tipo de archivo no compatible")
+                destino = os.path.join(dueno.carpeta, nombre)
+                base, ext = os.path.splitext(destino)
+                i = 1
+                while os.path.exists(destino):
+                    destino = f"{base}_{i}{ext}"
+                    i += 1
+                tmp = destino + ".part"
+                resto = n
+                with open(tmp, "wb") as f:
+                    while resto > 0:
+                        b = self.rfile.read(min(65536, resto))
+                        if not b:
+                            break
+                        f.write(b)
+                        resto -= len(b)
+                os.replace(tmp, destino)
+                self._resp(200, "ok")
+
+        self.httpd = http.server.ThreadingHTTPServer(("0.0.0.0", self.puerto), H)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def detener(self):
+        if self.httpd:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+            self.httpd = None
+
+
+
+# ---------------------------------------------------------------------------
+# Recibir archivos por Wi-Fi (desde el navegador de un celular u otro computador)
+# ---------------------------------------------------------------------------
+PAGINA_WIFI = """<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EduAccesible</title><style>body{font-family:Arial;background:#FAF6EB;color:#2B2650;text-align:center;padding:24px}
+button,input{font-size:20px;padding:14px;margin:8px;border-radius:12px;border:2px solid #895DCA}button{background:#895DCA;color:#fff}
+#m{font-size:20px;margin-top:18px}</style></head><body><h1>Enviar a EduAccesible</h1>
+<p>Código que aparece en la pantalla:</p><input id="c" inputmode="numeric" maxlength="4" size="4"><br>
+<input id="f" type="file" accept=".pdf,.docx,.txt,.md,.csv,.png,.jpg,.jpeg,.bmp"><br><button onclick="e()">Enviar</button><div id="m"></div>
+<script>async function e(){const f=document.getElementById('f').files[0],m=document.getElementById('m');
+if(!f){m.textContent='Elige un archivo';return}m.textContent='Enviando...';
+try{const r=await fetch('/subir',{method:'POST',headers:{'X-Nombre':encodeURIComponent(f.name),'X-Codigo':document.getElementById('c').value},body:f});
+m.textContent=r.ok?'Enviado. Ya se está leyendo en EduAccesible.':(r.status==403?'Código incorrecto':'No se pudo enviar')}catch(x){m.textContent='Sin conexión'}}</script></body></html>"""
+
+
+class ServidorWifi:
+    def __init__(self, carpeta):
+        self.carpeta = carpeta
+        self.codigo = ""
+        self.httpd = None
+        self.url = ""
+
+    @staticmethod
+    def ip_local():
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+        finally:
+            s.close()
+
+    def activo(self):
+        return self.httpd is not None
+
+    def iniciar(self, puerto=8765):
+        import http.server
+        import random
+        self.codigo = f"{random.randint(0, 9999):04d}"
+        dueno = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                datos = PAGINA_WIFI.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(datos)))
+                self.end_headers()
+                self.wfile.write(datos)
+
+            def do_POST(self):
+                if self.headers.get("X-Codigo", "") != dueno.codigo:
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                n = int(self.headers.get("Content-Length", 0))
+                if n <= 0 or n > 60 * 1024 * 1024:
+                    self.send_response(413)
+                    self.end_headers()
+                    return
+                nombre = os.path.basename(urllib.parse.unquote(self.headers.get("X-Nombre", "archivo")))
+                if not nombre.lower().endswith(EXT_DOC + EXT_IMG):
+                    self.send_response(415)
+                    self.end_headers()
+                    return
+                destino = os.path.join(dueno.carpeta, nombre)
+                if os.path.exists(destino):
+                    b, e = os.path.splitext(nombre)
+                    destino = os.path.join(dueno.carpeta, f"{b}_{int(time.time())}{e}")
+                with open(destino, "wb") as f:
+                    restante = n
+                    while restante > 0:
+                        bloque = self.rfile.read(min(65536, restante))
+                        if not bloque:
+                            break
+                        f.write(bloque)
+                        restante -= len(bloque)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+        self.httpd = http.server.ThreadingHTTPServer(("0.0.0.0", puerto), H)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"http://{self.ip_local()}:{puerto}"
+
+    def detener(self):
+        if self.httpd:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+            self.httpd = None
 
 
 def diagnostico():

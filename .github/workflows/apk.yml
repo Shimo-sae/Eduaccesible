@@ -37,6 +37,16 @@ jobs:
               t = re.sub(r"minSdkVersion\s+flutter\.minSdkVersion", "minSdkVersion 24", t)
               open(g, "w", encoding="utf-8").write(t)
           open("build_app/android/gradle.properties", "a").write("\nandroid.newDsl=false\n")
+          # ML Kit: R8 se queja de clases de otros idiomas (chino, japonés...) que no usamos. Se le dice que las ignore.
+          open("build_app/android/app/proguard-rules.pro", "w").write(
+              "-dontwarn com.google.mlkit.vision.text.**\n-dontwarn com.google.mlkit.vision.**\n")
+          for g in glob.glob("build_app/android/app/build.gradle*"):
+              t = open(g, encoding="utf-8").read()
+              if g.endswith(".kts"):
+                  t = re.sub(r"(buildTypes\s*\{\s*release\s*\{)", r'\1\n            proguardFiles("proguard-rules.pro")', t, count=1)
+              else:
+                  t = re.sub(r"(buildTypes\s*\{\s*release\s*\{)", r"\1\n            proguardFiles 'proguard-rules.pro'", t, count=1)
+              open(g, "w", encoding="utf-8").write(t)
           PY
       - name: Compilar el APK
         working-directory: build_app

@@ -1,12 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'pantallas.dart';
+import 'registro.dart';
 
 List<CameraDescription> camaras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  FlutterError.onError = (d) => Registro.anotar('ERROR: ${d.exceptionAsString()}');
+  PlatformDispatcher.instance.onError = (e, st) {
+    Registro.anotar('ERROR: $e');
+    return true;
+  };
+  Registro.anotar('App iniciada');
   await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
   try {
     camaras = await availableCameras();

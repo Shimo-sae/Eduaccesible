@@ -7,6 +7,7 @@ import 'package:share_plus/share_plus.dart';
 import 'config.dart';
 import 'documentos.dart';
 import 'wifi.dart';
+import 'registro.dart';
 import 'main.dart';
 import 'manos.dart';
 import 'senas.dart';
@@ -92,6 +93,7 @@ class _InicioState extends State<Inicio> {
 
   Future<void> _arrancar() async {
     await voz.iniciar();
+    estado = voz.info;
     await ajustes.cargar();
     if (mounted) setState(() {});
     await _abrirCamara();
@@ -167,11 +169,15 @@ class _InicioState extends State<Inicio> {
 
   // ---------------------------------------------------------------- señas de mano
   Future<bool> _iniciarManos() async {
-    if (cam == null || !cam!.value.isInitialized || descCamara == null) return false;
+    if (cam == null || !cam!.value.isInitialized || descCamara == null) {
+      Registro.anotar('Gestos: no se pueden iniciar, la cámara no está lista');
+      return false;
+    }
     try {
       await manos.iniciar(cam!, descCamara!);
       return true;
     } catch (e) {
+      Registro.anotar('Gestos: ERROR al iniciar: $e');
       setState(() => estado = 'Error de gestos: $e');
       return false;
     }
@@ -777,6 +783,41 @@ class _InicioState extends State<Inicio> {
         ),
       ]);
 
+  /// Muestra lo que ha hecho y detectado la app, para poder compartirlo si algo no funciona.
+  void verDiagnostico() {
+    Registro.anotar('--- Diagnóstico abierto ---');
+    final resumen = StringBuffer()
+      ..writeln('EduAccesible - diagnóstico')
+      ..writeln(voz.info)
+      ..writeln('Gestos activos: $gestosActivos | cuadros enviados al detector: ${Registro.veces('frames')} | veces que VIO manos: ${Registro.veces('manos')}')
+      ..writeln('Estado de gestos: ${manos.estadoTexto()}')
+      ..writeln('Cámara: ${cam?.value.isInitialized == true ? 'abierta' : 'NO abierta'}')
+      ..writeln('Pantalla: ${MediaQuery.of(context).size.width.round()}x${MediaQuery.of(context).size.height.round()}')
+      ..writeln()
+      ..write(Registro.texto());
+    final t = resumen.toString();
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Diagnóstico'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(child: SelectableText(t, style: const TextStyle(fontSize: 12, fontFamily: 'monospace'))),
+        ),
+        actions: [
+          TextButton(onPressed: () => Share.share(t, subject: 'Diagnóstico EduAccesible'), child: const Text('Compartir')),
+          TextButton(
+              onPressed: () {
+                Registro.limpiar();
+                Navigator.pop(ctx);
+              },
+              child: const Text('Borrar')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cerrar')),
+        ],
+      ),
+    );
+  }
+
   Widget vistaAjustes() {
     final items = <Widget>[
       tarjeta('🖐', gestosActivos ? 'Gestos: activados' : 'Gestos: apagados', 'Señas de mano con la cámara', azul, () => activarGestos(!gestosActivos)),
@@ -786,6 +827,7 @@ class _InicioState extends State<Inicio> {
       tarjeta('🔄', 'Cambiar de cámara', 'Frontal o trasera', azul, cambiarCamara),
       tarjeta('✋', 'Ver y escuchar las señas', 'Lista completa', morado, abrirSenas),
       tarjeta('⏹', 'Silencio', 'Corta la lectura', lila, () => voz.detener(), fg: texto),
+      tarjeta('🛠', 'Diagnóstico', 'Para enviar si algo falla', azul, verDiagnostico),
     ];
     return Column(children: [
       const Padding(

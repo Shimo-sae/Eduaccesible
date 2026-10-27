@@ -4,6 +4,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:hand_landmarker/hand_landmarker.dart';
 import 'senas.dart';
+import 'registro.dart';
 
 /// Una mano vista, para dibujarla (puntos normalizados 0..1) y saber si es "clara" (verde) o dudosa (naranja).
 class ManoVista {
@@ -40,6 +41,7 @@ class Manos {
     final dynamic creado = HandLandmarkerPlugin.create(
         numHands: 2, minHandDetectionConfidence: 0.7, delegate: HandLandmarkerDelegate.gpu);
     _plugin = await creado;
+    Registro.anotar('Gestos: detector creado (GPU). Cámara ${desc.lensDirection.name}, sensor ${desc.sensorOrientation}°');
     _sub = _plugin.landmarkStream.listen((dynamic h) => _alRecibir(List<Hand>.from(h)));
     _ultimaRespuestaMs = DateTime.now().millisecondsSinceEpoch;
     // Si el detector no avisa cuando no hay manos, cada 0,3 s sin respuesta se cuenta como "sin manos"
@@ -63,8 +65,12 @@ class Manos {
         final mn = math.min(img.width, img.height).toDouble(), mx = math.max(img.width, img.height).toDouble();
         _ancho = rot % 180 == 90 ? mn : mx;
         _alto = rot % 180 == 90 ? mx : mn;
+        Registro.contar('frames');
+        Registro.poco('frame', 'Gestos: cuadro ${img.width}x${img.height}, formato ${img.format.group.name}, giro $rot°');
         _plugin?.processFrame(img, rot);
-      } catch (_) {}
+      } catch (e) {
+        Registro.poco('errframe', 'Gestos: ERROR al procesar un cuadro: $e', max: 8);
+      }
     });
     activo = true;
   }
@@ -100,6 +106,10 @@ class Manos {
 
   void _alRecibir(List<Hand> hands) {
     _ultimaRespuestaMs = DateTime.now().millisecondsSinceEpoch;
+    if (hands.isNotEmpty) {
+      Registro.contar('manos');
+      Registro.poco('manos', 'Gestos: el detector VE ${hands.length} mano(s)', max: 6);
+    }
     final ahora = _ultimaRespuestaMs / 1000.0;
     final vistas = <ManoVista>[];
     final claras = <String?>[];

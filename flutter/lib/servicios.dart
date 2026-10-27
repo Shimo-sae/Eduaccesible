@@ -10,6 +10,7 @@ import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'etiquetas.dart';
 import 'figuras.dart';
+import 'registro.dart';
 
 /// Voz que lee (TextToSpeech de Android). Se puede cortar con [detener].
 class Voz {
@@ -17,14 +18,31 @@ class Voz {
   String ultimo = '';
   bool hablando = false;
 
+  /// Resumen de la voz elegida (se muestra en la barra de estado al abrir la app).
+  String info = '';
+  bool hayEspanol = true;
+  String _cod = 'es-ES';
+  Map<String, String>? _vozEs;
+
   Future<void> iniciar() async {
-    // Elige una voz realmente en español (si no, Android lee con su voz en inglés y mezcla los idiomas).
+    // 1) Motor: el de Google es el que trae buenas voces en español (algunos teléfonos usan uno propio sin español).
+    var motor = '';
+    try {
+      final motores = await _tts.getEngines;
+      if (motores is List && motores.any((m) => m.toString() == 'com.google.android.tts')) {
+        await _tts.setEngine('com.google.android.tts');
+        motor = 'Google';
+        await Future.delayed(const Duration(milliseconds: 500)); // el motor tarda un momento en cambiar
+      }
+    } catch (_) {}
+    // 2) Idioma: el primer español que el motor tenga de verdad.
     var fijada = false;
     for (final cod in ['es-CO', 'es-MX', 'es-US', 'es-419', 'es-ES']) {
       try {
         final r = await _tts.isLanguageAvailable(cod);
         if (r == true || r == 1) {
           await _tts.setLanguage(cod);
+          _cod = cod;
           fijada = true;
           break;
         }
@@ -35,6 +53,8 @@ class Voz {
         await _tts.setLanguage('es-ES');
       } catch (_) {}
     }
+    // 3) Voz concreta en español (con la que sí funciona sin internet, si hay)
+    var nVoces = 0;
     try {
       final voces = await _tts.getVoices;
       if (voces is List) {
@@ -42,21 +62,27 @@ class Voz {
           final loc = (v is Map ? (v['locale'] ?? '') : '').toString().toLowerCase().replaceAll('_', '-');
           return loc.startsWith('es');
         }).toList();
+        nVoces = es.length;
         if (es.isNotEmpty) {
           es.sort((a, b) {
             int pt(dynamic v) {
               final loc = (v['locale'] ?? '').toString().toLowerCase().replaceAll('_', '-');
               var n = 0;
               if (loc.contains('es-co') || loc.contains('es-mx') || loc.contains('es-us') || loc.contains('es-419')) n -= 2;
-              if (v['network_required'].toString() == '1') n += 1; // mejor una voz que funcione sin internet
+              if (v['network_required'].toString() == '1') n += 1;
               return n;
             }
             return pt(a).compareTo(pt(b));
           });
-          await _tts.setVoice({'name': es.first['name'].toString(), 'locale': es.first['locale'].toString()});
+          _vozEs = {'name': es.first['name'].toString(), 'locale': es.first['locale'].toString()};
+          await _tts.setVoice(_vozEs!);
         }
       }
     } catch (_) {}
+    hayEspanol = fijada || nVoces > 0;
+    info = hayEspanol
+        ? '🔊 Voz: ${motor.isEmpty ? 'del teléfono' : motor}, idioma $_cod, $nVoces voz(es) en español.'
+        : '🔊 Este teléfono NO tiene voz en español: se oirá en inglés. Instálala en Ajustes > Sistema > Idiomas > Salida de texto a voz > Google > Instalar datos de voz > Español.';
     await _tts.setSpeechRate(0.5);
     _tts.setStartHandler(() => hablando = true);
     _tts.setCompletionHandler(() => hablando = false);
@@ -89,6 +115,10 @@ class Voz {
     hablando = true;
     final partes = trozos(t);
     if (partes.isEmpty) return;
+    try {
+      await _tts.setLanguage(_cod); // algunos teléfonos vuelven al inglés solos
+      if (_vozEs != null) await _tts.setVoice(_vozEs!);
+    } catch (_) {}
     await _tts.speak(partes.first);
     if (partes.length > 1) {
       try {
@@ -172,6 +202,7 @@ class Escucha {
       listenOptions: stt.SpeechListenOptions(partialResults: true, cancelOnError: false),
       onResult: (r) {
         _ultimas = r.recognizedWords;
+        if (r.finalResult) Registro.anotar('Voz: oí "${r.recognizedWords}" (idioma $_idioma)');
         if (_ultimas.trim().isNotEmpty) alParcial?.call(_ultimas);
         if (r.finalResult && !_entregado && _ultimas.trim().isNotEmpty) {
           _entregado = true;
@@ -252,11 +283,18 @@ class Lector {
   }
 
   Future<String> figuras(String ruta, {required bool recorte}) async =>
-      fraseFiguras(await detectarFiguras(ruta, recorte: recorte));
+      fraseFiguras(await _figurasLog(ruta, recorte));
+
+  Future<List<Figura>> _figurasLog(String ruta, bool recorte) async {
+    final f = await detectarFiguras(ruta, recorte: recorte);
+    Registro.anotar('Figuras: se detectaron ${f.length} (recorte: $recorte)');
+    return f;
+  }
 
   /// Cuenta objetos POR TIPO: ML Kit encuentra dónde hay objetos y a cada uno se le pregunta qué es.
   Future<String> objetos(String ruta) async {
     final objs = await _obj.processImage(InputImage.fromFilePath(ruta));
+    Registro.anotar('Objetos: ML Kit encontró ${objs.length} -> ${objs.map((o) => '${o.boundingBox.width.round()}x${o.boundingBox.height.round()} ${o.labels.map((l) => l.text).join("/")}').join(" | ")}');
     if (objs.isEmpty) return 'No se detectaron objetos. Separa los objetos y usa buena luz.';
     final cuenta = <String, int>{};
     img.Image? im;

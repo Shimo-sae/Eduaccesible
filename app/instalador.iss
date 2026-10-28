@@ -2,7 +2,7 @@
 ; Resultado: Output\EduAccesible-Instalador.exe  (un solo archivo, se instala con Siguiente, Siguiente)
 [Setup]
 AppName=EduAccesible
-AppVersion=1.0
+AppVersion=8.0
 DefaultDirName={localappdata}\EduAccesible
 ; Se instala en la carpeta del usuario (no en Program Files) para que la app pueda guardar materiales y ajustes
 PrivilegesRequired=lowest
@@ -36,3 +36,24 @@ Filename: "{app}\EduAccesible.exe"; Description: "Abrir EduAccesible"; Flags: no
 [UninstallDelete]
 ; Al desinstalar se borra TODO lo que la app guardó o descargó (materiales, ajustes, entrada, modelos)
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+// Al desinstalar: ofrece guardar una copia de los materiales en Documentos (se borra todo lo demas).
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Origen, Destino: String;
+  Codigo: Integer;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    Origen := ExpandConstant('{app}\materiales');
+    if (not UninstallSilent) and DirExists(Origen) then
+    begin
+      if MsgBox('Quieres guardar una copia de tus materiales en la carpeta Documentos antes de desinstalar?', mbConfirmation, MB_YESNO) = IDYES then
+      begin
+        Destino := ExpandConstant('{userdocs}\EduAccesible materiales');
+        Exec(ExpandConstant('{sys}\xcopy.exe'), '"' + Origen + '" "' + Destino + '" /E /I /Y /Q', '', SW_HIDE, ewWaitUntilTerminated, Codigo);
+      end;
+    end;
+  end;
+end;

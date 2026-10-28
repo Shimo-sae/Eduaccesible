@@ -1,0 +1,38 @@
+EduAccesible v8 (exe)
+=====================
+Cambios sobre v7 (todo está en app.py; el instalador solo cambia el número de versión).
+
+FASE 1 - USABILIDAD
+- Velocidad y volumen de la voz: Ajustes (4 botones), teclas + / - (velocidad) y flechas arriba/abajo (volumen),
+  o por voz: "más lento", "más rápido", "subir volumen", "bajar volumen". Se guardan por perfil.
+- Pausar / continuar / siguiente / anterior: botones laterales, teclas P, N, B (o flechas izquierda/derecha) y voz
+  ("pausar", "continuar", "siguiente", "anterior"). El texto se parte en párrafos y la app recuerda en cuál va.
+  "Silencio" deja en pausa y se puede continuar.
+- Ayuda para encuadrar: avisa por voz "muy oscuro", "demasiada luz", "borrosa", "centra la hoja" y da un pitido que
+  sube de tono cuando la hoja está centrada. Se apaga en Ajustes. Los umbrales están al inicio del bloque v8
+  (UMBRAL_OSCURO, UMBRAL_CLARO, UMBRAL_BORROSO) por si hay que afinarlos con tu cámara.
+- Bienvenida hablada la primera vez (se repite desde Ajustes o diciendo "bienvenida").
+- Alto contraste y letra grande: Ajustes, o por voz ("alto contraste", "letra grande").
+- Materiales: nombre con las primeras palabras, búsqueda, borrar, favoritos (arriba de la lista).
+
+FASE 2 - EDUCATIVAS (menú, opción 8 "Más herramientas", o por voz)
+- Colores: dice el color del centro de la imagen (recuadro blanco en la vista).
+- Billetes: por el COLOR (2.000 azul, 5.000 café, 10.000 rojo, 20.000 naranja, 50.000 morado, 100.000 verde).
+  Es aproximado. Las monedas todavía no se reconocen. Para exactitud hacen falta fotos reales.
+- Operaciones: lee "3 + 4", "2 x 5", "8 ÷ 2"... y las calcula (solo + - * /, sin ejecutar nada); si hay "= 7" dice si está bien.
+- Diccionario: Wikcionario con internet (lo consultado se guarda para después); sin internet, ~100 palabras básicas.
+- Traducir: con internet (MyMemory). Idioma en Ajustes (inglés, francés, portugués, italiano, alemán). Sin internet
+  no traduce (los modelos sin conexión harían la app muy pesada). Usa la voz de ese idioma si Windows la tiene.
+- Perfiles: cada estudiante con sus ajustes y su carpeta de materiales; se elige al abrir (si hay más de uno) o en Ajustes.
+  "General" usa la carpeta materiales de siempre.
+- Lectura con resaltado: se resalta el párrafo y, con la voz de Windows, la palabra que se dice (si falla, solo el párrafo).
+
+FASE 3 - DISTRIBUCIÓN
+- Wi-Fi: al activar "Recibir por Wi-Fi" aparece un código QR; al escanearlo el celular abre la página con el código puesto.
+- Aviso de versión nueva: al abrir consulta un archivo. Hay que decir cuál: en config.json agrega
+  "url_version": "https://raw.githubusercontent.com/USUARIO/REPO/main/version.json"
+  (o escribe la dirección en URL_VERSION en app.py). El archivo puede ser {"version": "v9", "novedades": "..."} o solo "v9".
+- Autoprueba al arrancar: revisa cámara, micrófono, reconocimiento de voz, voz en español y lector, y dice lo que falte.
+  También en Ajustes > Revisar el equipo.
+
+Para compilar no hace falta instalar nada nuevo (el código QR es propio). Diagnóstico: Ajustes > Diagnóstico.

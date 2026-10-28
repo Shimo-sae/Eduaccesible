@@ -5145,7 +5145,7 @@ def qr_imagen(texto, modulo=8, borde=4):
 
 
 # ---- aviso de versión nueva y autoprueba
-URL_VERSION = ""  # p. ej. "https://raw.githubusercontent.com/USUARIO/REPO/main/version.json" (también sirve poner "url_version" en config.json)
+URL_VERSION = "https://raw.githubusercontent.com/Shimo-sae/Eduaccesible/refs/heads/main/app/version.json?token=GHSAT0AAAAAAENYFKLKSBS3PWQ2ZBVWANIQ2XCKWZQ"  # p. ej. "https://raw.githubusercontent.com/USUARIO/REPO/main/version.json" (también sirve poner "url_version" en config.json)
 
 
 def tupla_version(s):

@@ -98,7 +98,7 @@ CARPETA_MATERIALES = os.path.join(BASE_DIR, "materiales")
 CARPETA_ENTRADA = os.path.join(BASE_DIR, "entrada")
 os.makedirs(CARPETA_DEBUG, exist_ok=True)
 RUTA_LOG = os.path.join(CARPETA_DEBUG, "registro.txt")
-VERSION_APP = "v13"
+VERSION_APP = "v14"
 
 
 class _Tee:
@@ -4243,21 +4243,32 @@ class EduAccesibleApp:
     def _modo_dinero(self, frame):
         t0 = time.time()
         alto, ancho = frame.shape[:2]
-        if max(alto, ancho) > 1000:  # imágenes enormes hacen lento el análisis
-            f = 1000.0 / max(alto, ancho)
+        if max(alto, ancho) > 800:  # imágenes grandes hacen lento el análisis
+            f = 800.0 / max(alto, ancho)
             frame = cv2.resize(frame, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
-        texto = ""
-        try:
-            self.ocr.listo.wait(90)
-            if self.ocr.rapid is not None:
-                lineas = self.ocr._rapid_lineas(frame)  # UNA sola lectura: de ahí salen texto y números
-                texto = " ".join(lineas)
-                if not valores_en_texto(texto, BILLETES):
-                    texto += " " + self.ocr.numeros(frame, lineas)
-            else:
-                texto, _ = self.ocr.texto(frame, (6,), 12)
-        except Exception as e:
-            print(f"Dinero (OCR): {e}")
+        res = {"texto": ""}
+
+        def leer():
+            try:
+                if self.ocr.rapid is not None:
+                    lineas = self.ocr._rapid_lineas(frame)  # UNA sola lectura: de ahí salen texto y números
+                    t = " ".join(lineas)
+                    if not valores_en_texto(t, BILLETES):
+                        t += " " + self.ocr.numeros(frame, lineas)
+                    res["texto"] = t
+                else:
+                    res["texto"] = self.ocr.texto(frame, (6,), 12)[0]
+            except Exception as e:
+                print(f"Dinero (OCR): {e}")
+        if not self.ocr.listo.is_set():
+            self.voz.hablar("Preparando el lector. Un momento.")
+            self.ocr.listo.wait(60)
+        hilo = threading.Thread(target=leer, daemon=True)
+        hilo.start()
+        hilo.join(20)  # si el lector tarda más de 20 s se sigue sin él (solo con el color)
+        if hilo.is_alive():
+            print("DEBUG - dinero: el lector pasó de 20 s, se sigue con el color")
+        texto = res["texto"]
         print(f"DEBUG - dinero: OCR en {time.time() - t0:.1f} s")
         color = color_dominante_billete(frame)
         print(f"DEBUG - dinero: texto={texto!r} color={color}")
@@ -4267,7 +4278,9 @@ class EduAccesibleApp:
                 frase += self._sumar_dinero(valor)
             self.anunciar(frase, guardar_modo="dinero")
             return
+        t1 = time.time()
         monedas = identificar_monedas(frame, self._leer_moneda)
+        print(f"DEBUG - dinero: monedas en {time.time() - t1:.1f} s, total {time.time() - t0:.1f} s")
         if monedas:
             frase, total = frase_monedas(monedas)
             if total:

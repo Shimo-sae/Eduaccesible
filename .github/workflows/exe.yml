@@ -36,7 +36,7 @@ jobs:
       - name: Crear el programa con PyInstaller
         run: >
           python -m PyInstaller --noconfirm --clean --onedir --noconsole --name EduAccesible
-          --collect-all mediapipe --collect-all rapidocr_onnxruntime --collect-all vosk --collect-all onnxruntime --collect-all pypdfium2 --collect-all docx --collect-all segno
+          --collect-all mediapipe --collect-all rapidocr_onnxruntime --collect-all vosk --collect-all onnxruntime --collect-all pypdfium2 --collect-all docx
           --collect-submodules win32com --hidden-import pythoncom --hidden-import win32timezone
           --hidden-import pyttsx3.drivers --hidden-import pyttsx3.drivers.sapi5
           --icon logo.ico --exclude-module IPython --exclude-module pytest --exclude-module notebook --exclude-module tkinter.test app.py

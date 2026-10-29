@@ -1,11 +1,12 @@
+import ast
 import collections
 import difflib
+import html
+import json
+import math
 import subprocess
 import tempfile
-import html
-import math
 import unicodedata
-import json
 import os
 import queue
 import re
@@ -97,9 +98,7 @@ CARPETA_MATERIALES = os.path.join(BASE_DIR, "materiales")
 CARPETA_ENTRADA = os.path.join(BASE_DIR, "entrada")
 os.makedirs(CARPETA_DEBUG, exist_ok=True)
 RUTA_LOG = os.path.join(CARPETA_DEBUG, "registro.txt")
-VERSION_APP = "v9"
-REPO_GITHUB = "Shimo-sae/Eduaccesible"  # de aquí se consulta la última versión publicada (Releases)
-URL_VERSION = ""  # opcional: dirección de un archivo de texto con la última versión (por ejemplo "v9"). Vacío = no comprobar
+VERSION_APP = "v11"
 
 
 class _Tee:
@@ -198,13 +197,8 @@ VERDE = "#895dca"      # morado del logo (botones principales y "Accesible")
 NARANJA = "#5273ba"    # azul del logo (botones secundarios y "Edu")
 AMARILLO = "#cdb8ea"    # lila suave (botones con texto oscuro)
 TEXTO = "#2b2650"
-try:  # alto contraste (se elige en Ajustes y se aplica al abrir): fondo blanco, letras negras, botones muy marcados
-    with open(RUTA_CONFIG, encoding="utf-8") as _f:
-        _cfg0 = json.load(_f)
-except Exception:
-    _cfg0 = {}
-if _cfg0.get("contraste"):
-    CREMA, TEXTO, VERDE, NARANJA, AMARILLO = "#ffffff", "#000000", "#000000", "#0033a0", "#ffe600"
+CAJA_BG, CAJA_FG = "#ffffff", "#2b2650"   # cuadros de texto (v8: cambian con el alto contraste)
+RES_PARRAFO, RES_PARRAFO_FG, RES_PALABRA, RES_PALABRA_FG = "#fff0a8", "#2b2650", "#ffb347", "#000000"
 
 MODOS = {
     "texto": "Leer texto",
@@ -212,8 +206,20 @@ MODOS = {
     "numeros": "Reconocer números",
     "figuras": "Figuras geométricas",
     "objetos": "Contar objetos",
-    "dinero": "Billetes y monedas",
+    "colores": "Reconocer colores",
+    "dinero": "Billetes",
+    "operaciones": "Operaciones escritas",
+    "diccionario": "Diccionario",
+    "traducir": "Traducir",
 }
+AYUDA_MODO = {
+    "colores": "Apunta el centro de la cámara al objeto y presiona capturar.",
+    "dinero": "Pon el billete completo sobre un fondo blanco y presiona capturar.",
+    "operaciones": "Apunta la cámara a la operación, por ejemplo tres más cuatro, y presiona capturar.",
+    "diccionario": "Apunta la cámara a una sola palabra y presiona capturar.",
+    "traducir": "Apunta la cámara al texto que quieres traducir y presiona capturar.",
+}
+MODOS_MAS = ["colores", "dinero", "operaciones", "diccionario", "traducir"]
 ORDEN_MODOS = ["texto", "letras", "numeros", "figuras", "objetos"]
 
 
@@ -264,21 +270,6 @@ def guardar_config(**datos):
 _restablecer_v7()
 
 
-def _aplicar_perfil():
-    """Cada perfil (estudiante) tiene su propia carpeta de materiales. 'General' usa la de siempre."""
-    global CARPETA_MATERIALES
-    cfg = leer_config()
-    nombre = cfg.get("perfil", "General")
-    if nombre == "General":
-        CARPETA_MATERIALES = os.path.join(BASE_DIR, "materiales")
-    else:
-        CARPETA_MATERIALES = os.path.join(BASE_DIR, "perfiles", nombre, "materiales")
-    os.makedirs(CARPETA_MATERIALES, exist_ok=True)
-
-
-_aplicar_perfil()
-
-
 def idioma_ocr():
     """Usa español si está instalado; si no, inglés (evita que Tesseract falle)."""
     try:
@@ -299,6 +290,11 @@ class Voz:
     def __init__(self):
         self.cola = queue.Queue()
         self.salida = leer_config().get("salida")  # None = la salida predeterminada de Windows
+        self.recargar_ajustes()
+        self.al_palabra = None   # función(posición, largo): la pone la app para resaltar la palabra que se dice
+        self._desfase = 0
+        self.eventos = bool(leer_config().get("resaltar_palabras", False))  # resaltado palabra por palabra: apagado (más rápido); se resalta el párrafo
+        _EventosVoz.destino = self._evento_palabra
         self._parar = threading.Event()
         self._hablando = threading.Event()
         self.ultimo_fin = 0.0
@@ -326,13 +322,52 @@ class Voz:
                 candidatas.append((0 if latam else 1, i))
         return min(candidatas)[1] if candidatas else None
 
+    def recargar_ajustes(self):
+        """Velocidad (-8 a 8) y volumen (10 a 100) del perfil actual."""
+        try:
+            self.velocidad = max(-8, min(8, int(cfg_p("velocidad", -1))))
+            self.volumen = max(10, min(100, int(cfg_p("volumen", 100))))
+        except Exception:
+            self.velocidad, self.volumen = -1, 100
+
+    def _evento_palabra(self, pos, largo):
+        f = self.al_palabra
+        if f is not None:
+            f(max(0, pos - self._desfase), largo)
+
+    _LCID = {"es": 0x0A, "en": 0x09, "fr": 0x0C, "pt": 0x16, "it": 0x10, "de": 0x07}
+    _NOMBRES_VOZ = {"en": ("english", "inglés"), "fr": ("french", "français"), "pt": ("portuguese", "português"),
+                    "it": ("italian", "italiano"), "de": ("german", "deutsch")}
+
+    @classmethod
+    def _buscar_idioma(cls, voces, codigo):
+        """Índice de una voz instalada en ese idioma (para leer traducciones), o None."""
+        for i in range(voces.Count):
+            v = voces.Item(i)
+            try:
+                langs = [int(x, 16) for x in v.GetAttribute("Language").replace(" ", "").split(";") if x]
+            except Exception:
+                langs = []
+            desc = v.GetDescription().lower()
+            if any((l & 0x3FF) == cls._LCID[codigo] for l in langs) or any(k in desc for k in cls._NOMBRES_VOZ.get(codigo, ())):
+                return i
+        return None
+
     # --- SAPI (voz de Windows) ---
     def _crear_voz(self):
         import win32com.client
-        voz = win32com.client.Dispatch("SAPI.SpVoice")
-        cfg = leer_config()
-        voz.Rate = int(cfg.get("velocidad", -1))   # -10 muy lento ... 10 muy rápido
-        voz.Volume = int(cfg.get("volumen", 100))
+        voz = None
+        if self.eventos:  # con eventos de palabra (resaltado); si no se puede, voz normal
+            try:
+                voz = win32com.client.DispatchWithEvents("SAPI.SpVoice", _EventosVoz)
+                voz.GetVoices().Count
+            except Exception as e:
+                print(f"Sin eventos de palabra ({e}): se resalta por párrafos.")
+                self.eventos, voz = False, None
+        if voz is None:
+            voz = win32com.client.Dispatch("SAPI.SpVoice")
+        voz.Rate = self.velocidad
+        voz.Volume = self.volumen
         voces = voz.GetVoices()
         elegida = self._buscar_espanol(voces)
         if elegida is not None:
@@ -370,73 +405,63 @@ class Voz:
                 except Exception as e:
                     print(f"Error al cambiar la salida de audio: {e}")
                 continue
+            idioma = None
+            if isinstance(item, tuple):
+                item, idioma = item
+            cambiada, previa = False, None
             try:
                 self._parar.clear()
+                self._hablando.set()
                 if self.salida is None and time.time() - self.ultimo_fin > 4.0:
                     # Recrear la voz tras unos segundos de silencio: así sigue a Windows si conectas
                     # audífonos Bluetooth o de cable. Entre frases seguidas no se recrea (ahorra ~0,2 s cada una).
                     voz = self._crear_voz()
-                if not self.hay_espanol and not self._avisado_espanol:
+                self._desfase, largo0 = 0, len(item)
+                if idioma in (None, "es") and not self.hay_espanol and not self._avisado_espanol:
                     self._avisado_espanol = True
                     item = ("Atención: este computador no tiene voz en español instalada. Se oirá mezclado con inglés. "
                             "Instálala en Configuración, Hora e idioma, Idioma y región, Español, Opciones, Voz. ") + item
-                self._hablando.set()
+                    self._desfase = len(item) - largo0
+                if idioma and idioma != "es":  # traducciones: voz de ese idioma si está instalada
+                    try:
+                        voces = voz.GetVoices()
+                        k = self._buscar_idioma(voces, idioma)
+                        if k is not None:
+                            previa, cambiada = voz.Voice, True
+                            voz.Voice = voces.Item(k)
+                    except Exception as e:
+                        print(f"No se pudo elegir la voz en {idioma}: {e}")
+                try:
+                    voz.Rate, voz.Volume = self.velocidad, self.volumen
+                except Exception:
+                    pass
                 voz.Speak(item, 1)  # asíncrono: así se puede cortar a mitad de frase
-                while not voz.WaitUntilDone(100):
+                while not voz.WaitUntilDone(50):
+                    if self.eventos:
+                        try:
+                            pythoncom.PumpWaitingMessages()
+                        except Exception:
+                            pass
                     if self._parar.is_set():
                         voz.Speak("", 3)  # 3 = asíncrono + borrar lo que esté sonando
                         break
             except Exception as e:
                 print(f"Error de voz: {e}")
-            finally:
-                self._hablando.clear()
-                self.ultimo_fin = time.time()
-
-    def hablar_idioma(self, texto, idioma=0x09):
-        """Dice un texto con una voz de otro idioma (0x09 = inglés) si Windows la tiene; luego vuelve a la voz en español."""
-        print(f"[VOZ idioma {idioma:#x}] {texto}")
-
-        def trabajo(voz):
-            anterior = voz.Voice
-            try:
-                voces = voz.GetVoices()
-                for i in range(voces.Count):
+                if self.eventos:  # por si el resaltado palabra por palabra era el problema
+                    self.eventos = False
+                    print("Se apagó el resaltado palabra por palabra.")
                     try:
-                        langs = [int(x, 16) for x in voces.Item(i).GetAttribute("Language").replace(" ", "").split(";") if x]
+                        voz = self._crear_voz()
                     except Exception:
-                        langs = []
-                    if any((l & 0x3FF) == idioma for l in langs):
-                        voz.Voice = voces.Item(i)
-                        break
-                self._parar.clear()
-                self._hablando.set()
-                voz.Speak(texto, 1)
-                while not voz.WaitUntilDone(100):
-                    if self._parar.is_set():
-                        voz.Speak("", 3)
-                        break
+                        pass
             finally:
-                try:
-                    voz.Voice = anterior
-                except Exception:
-                    pass
+                if cambiada:
+                    try:
+                        voz.Voice = previa
+                    except Exception:
+                        pass
                 self._hablando.clear()
                 self.ultimo_fin = time.time()
-            return voz
-        self.cola.put(trabajo)
-
-    def ajustar(self, vel=0, vol=0):
-        """Cambia la velocidad (pasos de 1, de -6 a 6) o el volumen (pasos de 15, de 20 a 100) y lo recuerda."""
-        cfg = leer_config()
-        v = max(-6, min(6, int(cfg.get("velocidad", -1)) + vel))
-        w = max(20, min(100, int(cfg.get("volumen", 100)) + vol))
-        guardar_config(velocidad=v, volumen=w)
-
-        def trabajo(voz):
-            voz.Rate, voz.Volume = v, w
-            return voz
-        self.cola.put(trabajo)
-        return v, w
 
     def siguiente_salida(self, avisar):
         """Rota: predeterminada de Windows -> cada dispositivo de audio -> predeterminada."""
@@ -483,8 +508,8 @@ class Voz:
             try:
                 # Motor nuevo en cada frase: evita que pyttsx3 se quede mudo tras la primera
                 engine = pyttsx3.init()
-                engine.setProperty('rate', 140)
-                engine.setProperty('volume', 1.0)
+                engine.setProperty('rate', 140 + 12 * (self.velocidad + 1))
+                engine.setProperty('volume', self.volumen / 100.0)
                 for voice in engine.getProperty('voices'):
                     nombre = voice.name.lower()
                     idiomas = [
@@ -505,9 +530,10 @@ class Voz:
             except Exception as e:
                 print(f"Error de voz: {e}")
 
-    def hablar(self, texto):
+    def hablar(self, texto, idioma=None):
+        """idioma: None/'es' = español; 'en', 'fr'... = voz de ese idioma (traducciones)."""
         print(f"[VOZ] {texto}")
-        self.cola.put(texto)
+        self.cola.put((texto, idioma) if idioma and idioma != "es" else texto)
 
     def ocupada(self):
         """True si está hablando o tiene frases en espera."""
@@ -982,81 +1008,6 @@ def lista_senas():
     return [(SENAS[SENA_DE_ORDEN[o]][1], SENAS[SENA_DE_ORDEN[o]][2]) for o in orden]
 
 
-
-class Lectura:
-    """Lee un texto largo por párrafos: se puede pausar, continuar, adelantar y retroceder."""
-
-    def __init__(self, voz):
-        self.voz = voz
-        self.partes, self.i, self.gen = [], 0, 0
-        self.pausada = False
-
-    @staticmethod
-    def dividir(texto, tam=420):
-        partes = []
-        for bloque in re.split(r"\n\s*\n|\n", texto):
-            bloque = bloque.strip()
-            if not bloque:
-                continue
-            partes.extend(trozos_voz(bloque, tam) if len(bloque) > tam else [bloque])
-        return partes
-
-    def iniciar(self, texto, desde=0):
-        self.partes = self.dividir(texto)
-        self.i = max(0, min(desde, len(self.partes) - 1)) if self.partes else 0
-        self.pausada = False
-        self._arrancar()
-
-    def _arrancar(self):
-        self.gen += 1
-        self.voz.detener()
-        if self.i < len(self.partes):
-            threading.Thread(target=self._bucle, args=(self.gen,), daemon=True).start()
-
-    def _bucle(self, gen):
-        while gen == self.gen and self.i < len(self.partes):
-            self.voz.hablar(self.partes[self.i])
-            time.sleep(0.2)
-            while gen == self.gen and self.voz.ocupada():
-                time.sleep(0.1)
-            if gen == self.gen:
-                self.i += 1
-
-    def hay(self):
-        return bool(self.partes)
-
-    def pausar(self):
-        if not self.hay():
-            return False
-        self.gen += 1
-        self.pausada = True
-        self.voz.detener()
-        return True
-
-    def continuar(self):
-        if not self.hay() or self.i >= len(self.partes):
-            return False
-        self.pausada = False
-        self._arrancar()
-        return True
-
-    def mover(self, delta):
-        if not self.hay():
-            return False
-        self.i = max(0, min(len(self.partes) - 1, self.i + delta))
-        self.pausada = False
-        self._arrancar()
-        return True
-
-    def detener(self):
-        self.gen += 1
-        self.pausada = False
-        self.voz.detener()
-
-    def estado(self):
-        return f"párrafo {min(self.i + 1, len(self.partes))} de {len(self.partes)}" if self.partes else ""
-
-
 class Gestos:
     """Gestos de mano con MediaPipe. Ve hasta DOS manos, pero solo ejecuta un gesto cuando es claramente intencional:
       - la mano se ve completa (no cortada por el borde), con buena confianza y de tamaño razonable (no lejos);
@@ -1260,6 +1211,32 @@ def _sin_tildes(t):
 # (palabras clave, orden). Se revisa en este orden: lo más específico primero.
 ORDENES = [
     (("ayuda de senas", "lista de senas", "que senas hay", "todas las senas", "senas", "ayuda"), "senas_lista"),
+    (("reiniciar cuenta", "cuenta en cero", "borrar cuenta"), "dinero_reiniciar"),
+    (("total", "cuanto llevo", "cuanto suma"), "dinero_total"),
+    (("traducir al espanol", "al espanol", "de ingles a espanol"), "traducir_es"),
+    (("actualizar", "actualizacion", "buscar actualizacion"), "actualizar"),
+    (("significado", "definicion", "definir", "que significa"), "significado"),
+    (("mas lento", "mas despacio", "despacio", "lento"), "mas_lento"),
+    (("mas rapido", "mas deprisa", "rapido", "deprisa"), "mas_rapido"),
+    (("subir volumen", "mas volumen", "volumen alto", "sube el volumen", "subir el volumen"), "vol_subir"),
+    (("bajar volumen", "menos volumen", "volumen bajo", "baja el volumen", "bajar el volumen"), "vol_bajar"),
+    (("pausar", "pausa"), "pausa"),
+    (("continuar", "seguir", "sigue", "reanudar"), "continuar"),
+    (("siguiente parrafo", "adelantar", "adelante", "avanzar"), "siguiente"),
+    (("anterior", "retroceder"), "anterior"),
+    (("alto contraste", "contraste"), "contraste"),
+    (("letra grande", "letras grandes", "letra mas grande"), "letra_grande"),
+    (("perfiles", "perfil", "estudiante"), "perfiles"),
+    (("bienvenida", "tutorial", "recorrido"), "bienvenida"),
+    (("revisar equipo", "revisar el equipo", "autoprueba", "probar equipo"), "autoprueba"),
+    (("mas herramientas", "herramientas"), "mas"),
+    (("de que color es", "que color es"), "color"),
+    (("colores",), "m_colores"),
+    (("color",), "color"),
+    (("billetes", "billete", "dinero", "monedas", "plata"), "m_dinero"),
+    (("operaciones", "operacion", "calculadora", "calcular", "cuentas", "sumas"), "m_operaciones"),
+    (("diccionario",), "m_diccionario"),
+    (("traducir", "traduccion", "traduce", "traductor"), "traducir"),
     (("microfono del telefono", "microfono del celular", "microfono telefono", "microfono celular"), "mic_telefono"),
     (("microfono de la laptop", "microfono del computador", "microfono del portatil", "microfono de la computadora",
       "microfono integrado", "microfono laptop", "microfono computador", "microfono portatil"), "mic_laptop"),
@@ -1278,25 +1255,6 @@ ORDENES = [
     (("wifi", "wi fi", "recibir archivos", "recibir por"), "wifi"),
     (("documento", "archivo", "pdf", "word"), "importar_doc"),
     (("importar", "subir imagen", "abrir imagen", "imagen"), "importar"),
-    (("mas lento", "mas despacio", "despacio"), "vel_menos"),
-    (("mas rapido", "rapido", "mas deprisa"), "vel_mas"),
-    (("subir volumen", "mas volumen", "volumen alto", "sube el volumen"), "vol_mas"),
-    (("bajar volumen", "menos volumen", "volumen bajo", "baja el volumen"), "vol_menos"),
-    (("pausa", "pausar", "pausa lectura"), "pausa"),
-    (("continuar", "seguir", "sigue", "reanudar"), "continuar"),
-    (("parrafo anterior", "anterior", "retroceder"), "anterior"),
-    (("siguiente parrafo", "siguiente", "adelantar", "adelante"), "siguiente"),
-    (("ayuda de encuadre", "guia de encuadre", "encuadre"), "encuadre"),
-    (("actualizar", "actualizacion", "buscar actualizacion", "nueva version"), "actualizar"),
-    (("tutorial", "bienvenida", "como se usa", "instrucciones"), "tutorial"),
-    (("de que color es", "que color es", "color", "colores"), "color"),
-    (("significado", "que significa", "definicion", "definir"), "significado"),
-    (("traducir al espanol", "al espanol"), "traducir_es"),
-    (("traducir", "traduccion", "traduce"), "traducir"),
-    (("cambiar perfil", "siguiente perfil", "perfil"), "perfil"),
-    (("reiniciar cuenta", "borrar cuenta", "cuenta nueva", "empezar cuenta"), "dinero_reiniciar"),
-    (("total", "cuanto llevo", "cuanto suma", "suma total"), "dinero_total"),
-    (("billetes", "billete", "monedas", "moneda", "dinero", "plata", "cuanta plata", "cuanto dinero"), "m_dinero"),
     (("materiales", "guardados"), "materiales"),
     (("contar", "objetos", "cuantos"), "m_objetos"),
     (("figuras", "geometricas", "formas"), "m_figuras"),
@@ -1379,13 +1337,14 @@ GRAMATICA = ["capturar", "captura", "foto", "tomar", "escanear", "atrás", "volv
              "micrófono del teléfono", "micrófono del celular", "micrófono de la laptop", "micrófono del computador",
              "micrófono", "activar gestos", "desactivar gestos", "apagar gestos", "activar voz", "desactivar voz",
              "apagar voz", "dejar de escuchar", "escuchar siempre", "voz siempre activa", "modo voz", "gestos", "importar", "imagen", "importar imagen", "wifi", "recibir archivos", "documento", "importar documento", "abrir documento", "archivo", "pdf", "word",
-             "más lento", "más despacio", "despacio", "más rápido", "rápido", "subir volumen", "más volumen",
-             "bajar volumen", "menos volumen", "pausa", "pausar", "continuar", "seguir", "reanudar", "anterior",
-             "retroceder", "párrafo anterior", "siguiente", "siguiente párrafo", "adelantar", "ayuda de encuadre",
-             "encuadre", "tutorial", "bienvenida", "cómo se usa", "instrucciones", "color", "de qué color es",
-             "qué color es", "significado", "traducir", "traducir al español", "cambiar perfil", "perfil",
+             "más lento", "más despacio", "despacio", "más rápido", "subir volumen", "bajar volumen", "más volumen",
+             "menos volumen", "pausar", "pausa", "continuar", "seguir", "reanudar", "siguiente párrafo", "adelantar",
+             "anterior", "retroceder", "alto contraste", "contraste", "letra grande", "perfiles", "perfil", "bienvenida",
+             "tutorial", "revisar equipo", "autoprueba", "más herramientas", "herramientas", "colores", "color",
+             "billetes", "dinero", "monedas", "operaciones", "calcular", "diccionario", "significado", "traducir",
+             "traductor", "total", "reiniciar cuenta", "actualizar", "traducir al español", "al español",
+             "de qué color es", "qué significa",
              "ayuda", "señas", "lista de señas", "qué señas hay", "ayuda de señas", "seña de voz", "seña de ayuda",
-             "actualizar", "actualización", "billetes", "billete", "monedas", "moneda", "dinero", "plata", "total", "reiniciar cuenta", "borrar cuenta",
              "[unk]"]
 # Preguntas "¿cuál es la seña de ...?" para cada cosa que tiene seña (con tildes, como en el modelo de voz)
 for _cosa in ("leer texto", "letras", "números", "figuras", "contar objetos", "materiales", "ajustes", "capturar",
@@ -2068,6 +2027,8 @@ class EduAccesibleApp:
 
     def __init__(self, root):
         self.root = root
+        self.perfil = perfil_actual()
+        configurar_tema(bool(cfg_p("contraste", False)), bool(cfg_p("letra_grande", False)))
         self.root.title("EduAccesible - La información también se escucha")
         for _ico in (os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "logo.ico"), os.path.join(BASE_DIR, "logo.ico")):
             if os.path.exists(_ico):
@@ -2081,10 +2042,7 @@ class EduAccesibleApp:
         self.root.config(bg=CREMA)
 
         self.voz = Voz()
-        self.lectura = Lectura(self.voz)
-        self.ultimo_texto, self.ultima_palabra = "", ""
-        self.ayuda_encuadre = bool(leer_config().get("encuadre"))
-        self._t_encuadre, self._msg_encuadre, self._t_msg_encuadre = 0.0, "", 0.0
+        self.voz.al_palabra = lambda pos, largo: self.ui(lambda: self._resaltar_palabra(pos, largo))
         self.ocr = MotorOCR()
         threading.Thread(target=self.ocr.cargar, daemon=True).start()  # carga en segundo plano
         self.detector = DetectorObjetos(aviso=lambda t: self.voz.hablar(t))
@@ -2117,10 +2075,26 @@ class EduAccesibleApp:
         self.ultimo_audio = ""
         self.procesando = False
         self.cola_ui = queue.Queue()  # para actualizar la interfaz desde otros hilos
+        # v8: lectura por párrafos, ayuda de encuadre, esperas de arranque
+        self.parrafos = ListaParrafos()
+        self.leyendo, self.en_pausa, self._gen_lectura = False, False, 0
+        self._cerrojo_lectura = threading.Lock()
+        self._parrafo_hablando, self._idioma_lectura = 0, None
+        self.ayuda_encuadre = bool(cfg_p("encuadre", True))
+        self._t_encuadre, self._ultimo_aviso_enc, self._t_aviso_enc = 0.0, "", 0.0
+        self._buenos, self._avisado_centrado, self._pitando = 0, False, False
+        self._mic_listo, self._camara_lista = threading.Event(), threading.Event()
+        self._cache_mat, self._materiales_visibles, self._perfiles_visibles = {}, [], []
+        self._ventana_wifi = None
+        self.ultimo_texto, self.ultima_palabra = "", ""
+        self.nueva_version, self.btn_actualizar = None, None
 
         self._construir_interfaz()
 
         self.root.bind("<Key>", self.tecla)
+        for tecla_f, accion in (("<Right>", self.siguiente_parrafo), ("<Left>", self.anterior_parrafo),
+                                ("<Up>", lambda: self.ajustar_volumen(10)), ("<Down>", lambda: self.ajustar_volumen(-10))):
+            self.root.bind(tecla_f, lambda e, a=accion: None if e.widget.winfo_class() in ("Listbox", "Entry") else a())
         self.root.bind("<Escape>", lambda e: self.atras())
         self.root.protocol("WM_DELETE_WINDOW", self.cerrar)
 
@@ -2129,35 +2103,39 @@ class EduAccesibleApp:
         self.wifi = ServidorWifi(CARPETA_ENTRADA)
         self._entrada_vista = set(os.listdir(CARPETA_ENTRADA))  # lo que ya estaba no se vuelve a leer
         self.root.after(4000, self.vigilar_entrada)
-        if leer_config().get("letra_grande"):
-            self._aplicar_letra(True)
         if not leer_config().get("bienvenida_vista"):
-            guardar_config(bienvenida_vista=True)
-            self.root.after(2500, self.tutorial)  # primera vez: explica cómo se usa
+            self.root.after(500, self.abrir_bienvenida)
+        elif len(lista_perfiles()) > 1:
+            self.root.after(300, self.abrir_perfiles)
         else:
             self.voz.hablar("EduAccesible iniciado. Elige una función en el menú.")
-        self.root.after(15000, self.autoprueba)
-        threading.Thread(target=self.buscar_version, daemon=True).start()
         # La cámara se abre en segundo plano: antes la ventana no aparecía hasta que terminaba (hasta 5 s si la
         # última cámara era la del teléfono y no respondía).
         threading.Thread(target=self._abrir_camara_inicial, daemon=True).start()
+        self.autoprueba()
+        self.root.after(6000, lambda: threading.Thread(target=self.buscar_version, daemon=True).start())
 
     def _abrir_camara_inicial(self):
-        cap = self.abrir_camara_auto()
-        if cap is None:
-            self.ui(lambda: self.video_label.config(text="Cámara no disponible", fg="white", font=("Segoe UI", 16, "bold")))
-            self.voz.hablar("No se pudo abrir la cámara. Puedes importar imágenes desde materiales.")
-            return
-        self.cap = cap
-        if leer_config().get("gestos"):  # los gestos necesitan la cámara ya abierta
-            self.ui(lambda: self.alternar_gestos(True, silencioso=True))
+        try:
+            cap = self.abrir_camara_auto()
+            if cap is None:
+                self.ui(lambda: self.video_label.config(text="Cámara no disponible", fg="white", font=F(16, "bold")))
+                self.voz.hablar("No se pudo abrir la cámara. Puedes importar imágenes desde materiales.")
+                return
+            self.cap = cap
+            if leer_config().get("gestos"):  # los gestos necesitan la cámara ya abierta
+                self.ui(lambda: self.alternar_gestos(True, silencioso=True))
+        finally:
+            self._camara_lista.set()
 
     # ---------------------------- Interfaz --------------------------------
     @staticmethod
     def boton(padre, texto, color, comando, fg="white", fuente=15, **kw):
+        if ALTO_CONTRASTE:
+            fg = "#000000"
         b = tk.Button(padre, text=texto, command=comando, bg=color, fg=fg,
                       activebackground=Interfaz_oscuro(color), activeforeground=fg,
-                      font=("Segoe UI", fuente, "bold"), relief="flat", bd=0,
+                      font=F(fuente, "bold"), relief="flat", bd=0,
                       cursor="hand2", highlightthickness=1, highlightbackground=CREMA, highlightcolor=TEXTO, **kw)
         b.bind("<Enter>", lambda e: b.config(bg=Interfaz_oscuro(color)))   # resalta el botón bajo el mouse
         b.bind("<Leave>", lambda e: b.config(bg=color))
@@ -2166,28 +2144,28 @@ class EduAccesibleApp:
     def _construir_interfaz(self):
         cab = tk.Frame(self.root, bg=CREMA)
         cab.pack(pady=(10, 0))
-        tk.Label(cab, text="Edu", font=("Segoe UI", 30, "bold"), fg=NARANJA, bg=CREMA).pack(side="left")
-        tk.Label(cab, text="Accesible", font=("Segoe UI", 30, "bold"), fg=VERDE, bg=CREMA).pack(side="left")
+        tk.Label(cab, text="Edu", font=F(30, "bold"), fg=NARANJA, bg=CREMA).pack(side="left")
+        tk.Label(cab, text="Accesible", font=F(30, "bold"), fg=VERDE, bg=CREMA).pack(side="left")
         tk.Label(self.root, text="La información también se escucha",
-                 font=("Segoe UI", 13, "italic"), fg=TEXTO, bg=CREMA).pack(pady=(0, 6))
+                 font=F(13, "italic"), fg=TEXTO, bg=CREMA).pack(pady=(0, 6))
 
-        self.lbl_estado = tk.Label(self.root, text="", font=("Segoe UI", 13, "bold"), fg=TEXTO, bg=CREMA)
+        self.lbl_estado = tk.Label(self.root, text="", font=F(13, "bold"), fg=TEXTO, bg=CREMA)
         self.lbl_estado.pack(side="bottom", fill="x", pady=(0, 6))
 
         cuerpo = tk.Frame(self.root, bg=CREMA)
         cuerpo.pack(fill="both", expand=True, padx=15, pady=5)
 
-        # Botones laterales grandes (cámara, play, inicio, atrás)
+        # Botones laterales (capturar, repetir, párrafos, inicio, atrás)
         barra = tk.Frame(cuerpo, bg=CREMA)
         barra.pack(side="right", fill="y", padx=(12, 0))
-        for texto, color, cmd in [("📷\nCapturar", NARANJA, self.capturar),
-                                  ("▶\nRepetir", VERDE, self.repetir),
-                                  ("🏠\nInicio", NARANJA, self.ir_inicio),
-                                  ("↩\nAtrás", VERDE, self.atras)]:
-            b = self.boton(barra, texto, color, cmd, fuente=13, width=9)
-            b.pack(pady=7, ipady=14)
-            self._botones_barra = getattr(self, "_botones_barra", []) + [b]
-        self._compactar_barra(leer_config().get("letra_grande", False))
+        for texto, color, cmd in [("📷 Capturar", NARANJA, self.capturar), ("🔁 Repetir", VERDE, self.repetir),
+                                  ("⏮ Anterior", NARANJA, self.anterior_parrafo), ("⏸ Pausa", VERDE, self.alternar_pausa),
+                                  ("⏭ Siguiente", NARANJA, self.siguiente_parrafo), ("🏠 Inicio", VERDE, self.ir_inicio),
+                                  ("↩ Atrás", NARANJA, self.atras)]:
+            b = self.boton(barra, texto, color, cmd, fuente=12, width=11)
+            b.pack(pady=4, ipady=8)
+            if "Pausa" in texto:
+                self.btn_pausa = b
 
         self.contenido = tk.Frame(cuerpo, bg=CREMA)
         self.contenido.pack(side="left", fill="both", expand=True)
@@ -2197,12 +2175,15 @@ class EduAccesibleApp:
             "materiales": self._pantalla_materiales(),
             "ajustes": self._pantalla_ajustes(),
             "senas": self._pantalla_senas(),
+            "mas": self._pantalla_mas(),
+            "bienvenida": self._pantalla_bienvenida(),
+            "perfiles": self._pantalla_perfiles(),
         }
         self.mostrar("menu")
 
     def _pantalla_menu(self):
         ext, f = self._marco_scroll()
-        tk.Label(f, text="¿Qué quieres hacer?", font=("Segoe UI", 18, "bold"), fg=TEXTO, bg=CREMA).pack(pady=(5, 10))
+        tk.Label(f, text="¿Qué quieres hacer?", font=F(18, "bold"), fg=TEXTO, bg=CREMA).pack(pady=(5, 10))
         opciones = [
             ("📖  1. Leer texto   ☝ 1 dedo", VERDE, "white", lambda: self.abrir_modo("texto")),
             ("🅰  2. Reconocer letras y palabras   ✌ 2 dedos", NARANJA, "white", lambda: self.abrir_modo("letras")),
@@ -2211,37 +2192,39 @@ class EduAccesibleApp:
             ("🔢  5. Contar objetos   🖐 mano abierta", NARANJA, "white", lambda: self.abrir_modo("objetos")),
             ("📁  6. Materiales guardados   🖐+☝ dos manos", VERDE, "white", self.abrir_materiales),
             ("⚙  7. Ajustes   🖐+✌ dos manos", AMARILLO, TEXTO, self.abrir_ajustes),
-            ("💵  8. Billetes y monedas (Colombia)", VERDE, "white", lambda: self.abrir_modo("dinero")),
+            ("🧰  8. Más: colores, billetes, operaciones, diccionario, traducir", NARANJA, "white", self.abrir_mas),
         ]
         for texto, color, fg, cmd in opciones:
             self.boton(f, texto, color, cmd, fg=fg, fuente=16).pack(fill="x", padx=20, pady=5, ipady=9)
         tk.Label(f, text="Otras señas: 👊 repetir · 👊👊 capturar · 🖐🖐 silencio · ☝☝ inicio · ✌✌ atrás · 👍 voz activa · 3+3 dedos ayuda. "
                          "Pregunta: «¿cuál es la seña de materiales?»",
-                 font=("Segoe UI", 10, "bold"), fg=VERDE, bg=CREMA, wraplength=620).pack(pady=(4, 0))
-        tk.Label(f, text="Atajos: 1-7 elegir · C capturar · R repetir · V orden por voz · J señas · H voz siempre activa · I cambiar micrófono · L micrófono laptop · S silencio · M inicio · Esc atrás",
-                 font=("Segoe UI", 10), fg=TEXTO, bg=CREMA, wraplength=620).pack(pady=8)
+                 font=F(10, "bold"), fg=VERDE, bg=CREMA, wraplength=620).pack(pady=(4, 0))
+        tk.Label(f, text="Atajos: 1-8 elegir · C capturar · R repetir · P pausa · N siguiente · B anterior · + − velocidad · ↑↓ volumen · V orden por voz · J señas · H voz siempre activa · I cambiar micrófono · L micrófono laptop · S silencio · M inicio · Esc atrás",
+                 font=F(10), fg=TEXTO, bg=CREMA, wraplength=620).pack(pady=8)
         return ext
 
     def _pantalla_modo(self):
         ext, f = self._marco_scroll()
-        self.lbl_titulo_modo = tk.Label(f, text="", font=("Segoe UI", 18, "bold"), fg=VERDE, bg=CREMA)
+        self.lbl_titulo_modo = tk.Label(f, text="", font=F(18, "bold"), fg=VERDE, bg=CREMA)
         self.lbl_titulo_modo.pack(pady=(0, 6))
         self.video_label = tk.Label(f, bg="#000000", bd=2, relief="solid")
         self.video_label.pack()
-        self.lbl_resultado = tk.Label(f, text="", font=("Segoe UI", 15), fg=TEXTO, bg=CREMA,
-                                      wraplength=560, justify="left", height=5)
-        self.lbl_resultado.pack(pady=(10, 4), fill="x")
+        marco_res = tk.Frame(f, bg=CREMA)
+        marco_res.pack(pady=(10, 4), fill="x")
+        sb = tk.Scrollbar(marco_res)
+        sb.pack(side="right", fill="y")
+        self.lbl_resultado = CajaResultado(marco_res, height=5, width=46, yscrollcommand=sb.set)
+        self.lbl_resultado.pack(side="left", fill="x", expand=True)
+        sb.config(command=self.lbl_resultado.yview)
         fila = tk.Frame(f, bg=CREMA)
         fila.pack(pady=4)
-        # Los botones se acomodan en una cuadrícula: con letra grande bajan de renglón en vez de salirse de la pantalla.
-        todos = [("🖼 Imagen", NARANJA, "white", self.importar_imagen), ("📄 Documento", NARANJA, "white", self.importar_documento),
-                 ("🎤 Hablar (V)", VERDE, "white", self.escuchar_orden),
-                 ("📚 Significado", VERDE, "white", self.decir_significado), ("🌐 Traducir", NARANJA, "white", lambda: self.traducir_ultimo("es", "en")),
-                 ("⏮ Anterior (B)", AMARILLO, TEXTO, lambda: self.mover_lectura(-1)), ("⏯ Pausa (P)", AMARILLO, TEXTO, self.pausar_lectura),
-                 ("⏭ Siguiente (N)", AMARILLO, TEXTO, lambda: self.mover_lectura(1)),
-                 ("🐢 Más lento", AMARILLO, TEXTO, lambda: self.cambiar_voz(vel=-1)), ("🐇 Más rápido", AMARILLO, TEXTO, lambda: self.cambiar_voz(vel=1))]
-        for i, (txt, color, fg, cmd) in enumerate(todos):
-            self.boton(fila, txt, color, cmd, fg=fg, fuente=11).grid(row=i // 3, column=i % 3, padx=4, pady=3, ipady=4, ipadx=6, sticky="ew")
+        self.boton(fila, "🖼 Imagen", NARANJA, self.importar_imagen, fuente=12).pack(side="left", padx=5, ipady=6, ipadx=12)
+        self.boton(fila, "📄 Documento", NARANJA, self.importar_documento, fuente=12).pack(side="left", padx=5, ipady=6, ipadx=12)
+        self.boton(fila, "🎤 Hablar (V)", VERDE, self.escuchar_orden, fuente=12).pack(side="left", padx=5, ipady=6, ipadx=12)
+        fila2 = tk.Frame(f, bg=CREMA)
+        fila2.pack(pady=2)
+        for t, cmd in (("📚 Significado", self.decir_significado), ("🌐 Traducir", self.traducir_auto), ("🎨 Color", self.decir_color)):
+            self.boton(fila2, t, AMARILLO, cmd, fg=TEXTO, fuente=12).pack(side="left", padx=5, ipady=5, ipadx=10)
         return ext
 
     def _marco_scroll(self):
@@ -2258,14 +2241,34 @@ class EduAccesibleApp:
         lienzo.bind("<Configure>", lambda e: lienzo.itemconfigure(ventana, width=e.width))
 
         def rueda(e):
-            if ext.winfo_ismapped() and interno.winfo_reqheight() > lienzo.winfo_height():
-                lienzo.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+            try:
+                if ext.winfo_ismapped() and interno.winfo_reqheight() > lienzo.winfo_height():
+                    lienzo.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+            except tk.TclError:  # la pantalla se reconstruyó (cambio de tema)
+                pass
         lienzo.bind_all("<MouseWheel>", rueda, add="+")
         return ext, interno
 
     def _pantalla_ajustes(self):
         ext, f = self._marco_scroll()
-        tk.Label(f, text="Ajustes", font=("Segoe UI", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 8))
+        tk.Label(f, text="Ajustes", font=F(18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 8))
+        fila_voz = tk.Frame(f, bg=CREMA)
+        fila_voz.pack(fill="x", padx=30, pady=3)
+        for i, (t, c, cmd) in enumerate([("🐢 Más lenta  ( − )", VERDE, lambda: self.ajustar_velocidad(-1)),
+                                         ("🐇 Más rápida  ( + )", NARANJA, lambda: self.ajustar_velocidad(1)),
+                                         ("🔉 Menos volumen  ( ↓ )", VERDE, lambda: self.ajustar_volumen(-10)),
+                                         ("🔊 Más volumen  ( ↑ )", NARANJA, lambda: self.ajustar_volumen(10))]):
+            self.boton(fila_voz, t, c, cmd, fuente=11).grid(row=i // 2, column=i % 2, sticky="ew", padx=2, pady=2, ipady=5)
+            fila_voz.columnconfigure(i % 2, weight=1)
+        self.lbl_voz_info = tk.Label(f, text=self._info_voz(), font=F(11), fg=TEXTO, bg=CREMA)
+        self.lbl_voz_info.pack()
+        for nombre, texto, color, fg, cmd in [
+                ("btn_contraste", "🎨  Alto contraste: " + ("activado" if cfg_p("contraste", False) else "apagado"), AMARILLO, TEXTO, self.alternar_contraste),
+                ("btn_letra", "🔠  Letra grande: " + ("activada" if cfg_p("letra_grande", False) else "apagada"), VERDE, "white", self.alternar_letra_grande),
+                ("btn_encuadre", "🎯  Ayuda para encuadrar: " + ("activada" if self.ayuda_encuadre else "apagada"), NARANJA, "white", self.alternar_encuadre)]:
+            b = self.boton(f, texto, color, cmd, fg=fg, fuente=13)
+            b.pack(fill="x", padx=30, pady=3, ipady=6)
+            setattr(self, nombre, b)
         for texto, color, fg, cmd in [
             ("🔄  Cambiar cámara  (K)", VERDE, "white", self.cambiar_camara),
             ("📱  Teléfono: cámara y micrófono a la vez", NARANJA, "white", self.conectar_telefono_completo),
@@ -2277,20 +2280,15 @@ class EduAccesibleApp:
             ("🖐  Ver y escuchar las señas  (J)", AMARILLO, TEXTO, self.abrir_senas),
             ("🎙  Cambiar micrófono  (I)", NARANJA, "white", self.cambiar_microfono),
             ("💻  Micrófono de la laptop  (L)", VERDE, "white", self.usar_mic_laptop),
-            ("🐢  Voz más lenta", VERDE, "white", lambda: self.cambiar_voz(vel=-1)),
-            ("🐇  Voz más rápida", NARANJA, "white", lambda: self.cambiar_voz(vel=1)),
-            ("🔉  Bajar volumen", AMARILLO, TEXTO, lambda: self.cambiar_voz(vol=-15)),
-            ("🔊  Subir volumen", VERDE, "white", lambda: self.cambiar_voz(vol=15)),
-            ("🎯  Ayuda de encuadre: " + ("activada" if leer_config().get("encuadre") else "apagada"), NARANJA, "white", self.alternar_encuadre),
-            ("🔠  Letra grande: " + ("sí" if leer_config().get("letra_grande") else "no"), AMARILLO, TEXTO, self.alternar_letra),
-            ("◐  Alto contraste: " + ("activado" if leer_config().get("contraste") else "apagado") + " (reinicia)", VERDE, "white", self.alternar_contraste),
-            ("🎨  ¿De qué color es? (apunta al centro)", NARANJA, "white", self.decir_color),
-            ("👤  Perfil: " + leer_config().get("perfil", "General"), AMARILLO, TEXTO, self.cambiar_perfil),
-            ("📖  Tutorial hablado", VERDE, "white", self.tutorial),
             ("🐢  Modo equipo lento: " + ("activado" if hay_modo_lento() else "apagado"), NARANJA, "white", self.alternar_lento),
-            ("🔄  Buscar actualización  (" + VERSION_APP + ")", VERDE, "white", self.pedir_actualizacion),
             ("🛠  Diagnóstico (para enviar si algo falla)", AMARILLO, TEXTO, self.abrir_diagnostico),
             ("📱  Micrófono del teléfono (por Wi-Fi)", AMARILLO, TEXTO, self.conectar_mic_telefono),
+            ("🌐  Traducir al: " + IDIOMAS.get(cfg_p("idioma", "en"), "inglés"), VERDE, "white", self.cambiar_idioma),
+            ("👤  Perfiles (cambiar de estudiante)", NARANJA, "white", self.abrir_perfiles),
+            ("👋  Ver la bienvenida otra vez", AMARILLO, TEXTO, self.abrir_bienvenida),
+            ("✅  Revisar el equipo (cámara, micrófono, voz, lector)", VERDE, "white", lambda: self.autoprueba(manual=True)),
+            ("⬇  Buscar actualización", NARANJA, "white", self.pedir_actualizacion),
+            ("🎨  ¿De qué color es?", AMARILLO, TEXTO, self.decir_color),
         ]:
             b = self.boton(f, texto, color, cmd, fg=fg, fuente=13)
             b.pack(fill="x", padx=30, pady=3, ipady=6)
@@ -2300,69 +2298,55 @@ class EduAccesibleApp:
                 self.btn_voz = b
             if "equipo lento" in texto:
                 self.btn_lento = b
-            if "encuadre" in texto:
-                self.btn_encuadre = b
-            if "Letra grande" in texto:
-                self.btn_letra = b
-            if "Alto contraste" in texto:
-                self.btn_contraste = b
-            if "Perfil:" in texto:
-                self.btn_perfil = b
+            if "Traducir al" in texto:
+                self.btn_idioma = b
             if "actualización" in texto:
                 self.btn_actualizar = b
         return ext
 
     def _pantalla_senas(self):
         f = tk.Frame(self.contenido, bg=CREMA)
-        tk.Label(f, text="Señas de mano", font=("Segoe UI", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 4))
+        tk.Label(f, text="Señas de mano", font=F(18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 4))
         tk.Label(f, text="Mantén la seña quieta 1 segundo. Pregunta: «¿cuál es la seña de ...?»",
-                 font=("Segoe UI", 11), fg=TEXTO, bg=CREMA).pack()
+                 font=F(11), fg=TEXTO, bg=CREMA).pack()
         marco = tk.Frame(f, bg=CREMA)
         marco.pack(fill="both", expand=True, padx=10, pady=6)
         scroll = tk.Scrollbar(marco)
         scroll.pack(side="right", fill="y")
-        self.txt_senas = tk.Text(marco, font=("Segoe UI", 13), wrap="word", height=14, bg="white", fg=TEXTO,
+        self.txt_senas = tk.Text(marco, font=F(13), wrap="word", height=14, bg=CAJA_BG, fg=CAJA_FG,
                                  relief="flat", yscrollcommand=scroll.set, state="disabled")
-        self.txt_senas.tag_configure("t", font=("Segoe UI", 14, "bold"), foreground=VERDE)
+        self.txt_senas.tag_configure("t", font=F(14, "bold"), foreground=VERDE)
         self.txt_senas.pack(side="left", fill="both", expand=True)
         scroll.config(command=self.txt_senas.yview)
         return f
 
     def _pantalla_materiales(self):
-        ext, f = self._marco_scroll()
-        tk.Label(f, text="Materiales guardados", font=("Segoe UI", 18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 4))
-        busq = tk.Frame(f, bg=CREMA)
-        busq.pack(fill="x", padx=12)
-        tk.Label(busq, text="🔎 Buscar:", font=("Segoe UI", 12), fg=TEXTO, bg=CREMA).pack(side="left")
+        f = tk.Frame(self.contenido, bg=CREMA)
+        tk.Label(f, text="Materiales guardados", font=F(18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 4))
+        fila_b = tk.Frame(f, bg=CREMA)
+        fila_b.pack(fill="x", padx=10, pady=(0, 4))
+        tk.Label(fila_b, text="🔍 Buscar:", font=F(12), fg=TEXTO, bg=CREMA).pack(side="left")
         self.var_busqueda = tk.StringVar()
         self.var_busqueda.trace_add("write", lambda *a: self.refrescar_materiales())
-        tk.Entry(busq, textvariable=self.var_busqueda, font=("Segoe UI", 12)).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Entry(fila_b, textvariable=self.var_busqueda, font=F(13), bg=CAJA_BG, fg=CAJA_FG,
+                 insertbackground=CAJA_FG).pack(side="left", fill="x", expand=True, padx=6)
         marco = tk.Frame(f, bg=CREMA)
-        marco.pack(fill="both", expand=True, padx=10, pady=4)
+        marco.pack(fill="both", expand=True, padx=10)
         scroll = tk.Scrollbar(marco)
         scroll.pack(side="right", fill="y")
-        self.lista = tk.Listbox(marco, font=("Segoe UI", 12), yscrollcommand=scroll.set, height=8,
-                                selectbackground=VERDE, exportselection=False)
+        self.lista = tk.Listbox(marco, font=F(13), yscrollcommand=scroll.set, height=8, bg=CAJA_BG, fg=CAJA_FG,
+                                selectbackground=VERDE, selectforeground="#000000" if ALTO_CONTRASTE else "white")
         self.lista.pack(side="left", fill="both", expand=True)
         scroll.config(command=self.lista.yview)
-        self.lista.bind("<Double-Button-1>", lambda e: self.escuchar_material())
-
         fila = tk.Frame(f, bg=CREMA)
         fila.pack(pady=6)
-        botones = [
-            ("🔊 Escuchar", VERDE, "white", self.escuchar_material),
-            ("⭐ Favorito", AMARILLO, TEXTO, self.favorito_material),
-            ("🗑 Borrar", NARANJA, "white", self.borrar_material),
-            ("🖼 Imagen", NARANJA, "white", self.importar_imagen),
-            ("📄 Documento", NARANJA, "white", self.importar_documento),
-            ("📶 Recibir por Wi-Fi", VERDE, "white", self.alternar_wifi),
-            ("📂 Materiales", AMARILLO, TEXTO, self.abrir_carpeta),
-            ("💾 Guardar/copiar texto", AMARILLO, TEXTO, self.compartir_texto),
-            ("👤 Perfil", VERDE, "white", self.nuevo_perfil),
-        ]
-        for i, (texto, color, fg, cmd) in enumerate(botones):
-            self.boton(fila, texto, color, cmd, fg=fg, fuente=11).grid(row=i // 3, column=i % 3, padx=4, pady=3, ipady=5, ipadx=4, sticky="ew")
-        return ext
+        botones = [("🔊 Escuchar", VERDE, "white", self.escuchar_material), ("⭐ Favorito", NARANJA, "white", self.alternar_favorito),
+                   ("🗑 Borrar", AMARILLO, TEXTO, self.borrar_material), ("🖼 Imagen", NARANJA, "white", self.importar_imagen),
+                   ("📄 Documento", NARANJA, "white", self.importar_documento), ("📂 Carpeta", AMARILLO, TEXTO, self.abrir_carpeta),
+                   ("📶 Recibir por Wi-Fi", VERDE, "white", self.alternar_wifi), ("💾 Guardar/copiar texto", AMARILLO, TEXTO, self.compartir_texto)]
+        for i, (t, c, fg, cmd) in enumerate(botones):
+            self.boton(fila, t, c, cmd, fg=fg, fuente=11).grid(row=i // 3, column=i % 3, padx=4, pady=3, ipady=4, ipadx=4)
+        return f
 
     def mostrar(self, nombre):
         for p in self.pantallas.values():
@@ -2388,8 +2372,8 @@ class EduAccesibleApp:
         if isinstance(indice, str):
             return self._abrir_red(indice)
         _res = (640, 480) if self.modo_lento else RES_CAMARA  # modo equipo lento: menos píxeles que procesar
-        # Varios intentos: algunas cámaras no dan imagen con MJPG o con 720p (pantalla negra). Se acepta la primera que
-        # entregue imagen de verdad, no negra.
+        # Varios intentos: algunas cámaras no dan imagen con MJPG o con 720p (pantalla negra). Se acepta la primera
+        # forma que entregue imagen de verdad, no negra.
         intentos = []
         for mjpg, res in ((True, _res), (False, _res), (True, (640, 480)), (False, (640, 480))):
             if (mjpg, res) not in intentos:
@@ -2400,7 +2384,7 @@ class EduAccesibleApp:
                 if not cap.isOpened():
                     cap.release()
                     break  # este backend no puede con esta cámara: pasar al siguiente
-                if mjpg:  # la cámara comprime el video y llega fluido (sin esto, en 720p muchas dan 5-10 cuadros/s)
+                if mjpg:  # la cámara comprime el video y llega fluido
                     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
@@ -2417,17 +2401,6 @@ class EduAccesibleApp:
                 print(f"Cámara {indice}: sin imagen (backend {backend}, {'MJPG' if mjpg else 'sin MJPG'}, {res}); pruebo otra forma.")
                 cap.release()
         return None
-
-    @staticmethod
-    def _esperar_imagen(cap, maximo=3.0):
-        """True cuando la cámara ya entrega imagen no negra (muchas tardan ~1 s en ajustar la luz y al inicio salen negras)."""
-        fin = time.time() + maximo
-        while time.time() < fin:
-            ok, frame = cap.read()
-            if ok and frame is not None and frame.size and float(frame.mean()) > 6:
-                return True
-            time.sleep(0.04)
-        return False
 
     @staticmethod
     def _ajustar_ip_webcam(url):
@@ -2796,14 +2769,16 @@ class EduAccesibleApp:
              "mic_cambiar": self.cambiar_microfono,
              "voz_on": lambda: self.alternar_voz_continua(True), "voz_off": lambda: self.alternar_voz_continua(False), "ajustes": self.abrir_ajustes, "importar": self.importar_imagen, "importar_doc": self.importar_documento, "wifi": self.alternar_wifi,
              "materiales": self.abrir_materiales, "capturar": self.capturar, "repetir": self.repetir,
-             "silencio": self.silencio, "inicio": self.ir_inicio, "atras": self.atras,
-             "vel_menos": lambda: self.cambiar_voz(vel=-1), "vel_mas": lambda: self.cambiar_voz(vel=1),
-             "vol_mas": lambda: self.cambiar_voz(vol=15), "vol_menos": lambda: self.cambiar_voz(vol=-15),
-             "pausa": self.pausar_lectura, "continuar": self.continuar_lectura,
-             "siguiente": lambda: self.mover_lectura(1), "anterior": lambda: self.mover_lectura(-1),
-             "encuadre": self.alternar_encuadre, "tutorial": self.tutorial, "color": self.decir_color,
-             "significado": self.decir_significado, "actualizar": self.pedir_actualizacion, "dinero_total": self.decir_total_dinero, "dinero_reiniciar": self.reiniciar_dinero, "traducir": lambda: self.traducir_ultimo("es", "en"),
-             "traducir_es": lambda: self.traducir_ultimo("en", "es"), "perfil": self.cambiar_perfil,
+             "silencio": self.silenciar, "inicio": self.ir_inicio, "atras": self.atras,
+             "pausa": self.pausar_lectura, "continuar": self.continuar_lectura, "siguiente": self.siguiente_parrafo,
+             "anterior": self.anterior_parrafo, "mas_lento": lambda: self.ajustar_velocidad(-1),
+             "mas_rapido": lambda: self.ajustar_velocidad(1), "vol_subir": lambda: self.ajustar_volumen(10),
+             "vol_bajar": lambda: self.ajustar_volumen(-10), "contraste": self.alternar_contraste,
+             "letra_grande": self.alternar_letra_grande, "perfiles": self.abrir_perfiles, "bienvenida": self.abrir_bienvenida,
+             "autoprueba": lambda: self.autoprueba(manual=True), "mas": self.abrir_mas,
+             "dinero_total": self.decir_total_dinero, "dinero_reiniciar": self.reiniciar_dinero,
+             "significado": self.decir_significado, "traducir": self.traducir_auto, "traducir_es": self.traducir_a_espanol,
+             "color": self.decir_color, "actualizar": self.pedir_actualizacion,
              "senas_lista": self.abrir_senas}[orden]()
 
     def alternar_gestos(self, activar=None, silencioso=False):
@@ -2951,7 +2926,7 @@ class EduAccesibleApp:
             self.abrir_modo(orden[2:])
         else:
             {"materiales": self.abrir_materiales, "ajustes": self.abrir_ajustes, "repetir": self.repetir,
-             "silencio": self.voz.detener, "inicio": self.ir_inicio, "atras": self.atras}[orden]()
+             "silencio": self.silenciar, "inicio": self.ir_inicio, "atras": self.atras}[orden]()
 
     def abrir_senas(self):
         """Pantalla con todas las señas; también las lee en voz alta (la voz se puede cortar con: silencio, o la tecla S)."""
@@ -3017,37 +2992,6 @@ class EduAccesibleApp:
         finally:
             self.cambiando_camara = False
 
-    def _vigilar_camara(self, lector, n):
-        """Si la cámara USB lleva varios segundos sin entregar cuadros mientras se necesita, se vuelve a abrir sola."""
-        ahora = time.time()
-        if not (self.pantalla == "modo" or self.gestos_activos):
-            self._t_cuadro = ahora  # en el menú no se leen cuadros: no es una falla
-            return
-        if n != getattr(self, "_n_vigilado", -1) or self.cambiando_camara:
-            self._n_vigilado, self._t_cuadro = n, ahora
-            return
-        if (self.pantalla == "modo" or self.gestos_activos) and isinstance(self.indice_camara, int) \
-                and ahora - getattr(self, "_t_cuadro", ahora) > 6 and ahora - getattr(self, "_t_reabierta", 0) > 20:
-            self._t_reabierta = self._t_cuadro = ahora
-            self.cambiando_camara = True
-            print("Cámara sin imágenes desde hace 6 s: se vuelve a abrir.")
-            self.voz.hablar("La cámara dejó de responder. La estoy reiniciando.")
-            threading.Thread(target=self._reabrir_camara, daemon=True).start()
-
-    def _reabrir_camara(self):
-        try:
-            viejo, self.cap = self.cap, None
-            time.sleep(0.3)
-            if viejo is not None:
-                viejo.release()
-            cap = self._abrir_indice(self.indice_camara) or self.abrir_camara_auto()
-            self.frames_recientes.clear()
-            self.cap = cap
-            if cap is None:
-                self.anunciar("No pude reabrir la cámara. Revisa que no la use otro programa, o usa Cambiar cámara.")
-        finally:
-            self.cambiando_camara = False
-
     def actualizar_video(self):
         lector = self.lector
         if lector is not None:
@@ -3057,10 +3001,8 @@ class EduAccesibleApp:
                 self._ultimo_n = n
                 self.ultimo_frame = frame
                 self.frames_recientes.append(frame)
-                if self.ayuda_encuadre and self.pantalla == "modo" and self.modo_actual in ("texto", "letras", "numeros") \
-                        and time.time() - self._t_encuadre > 3:
-                    self._t_encuadre = time.time()
-                    self._revisar_encuadre(frame)
+                if self.pantalla == "modo":
+                    self._ayuda_encuadre(frame)
                 if self.gestos_activos:
                     self._frame_gestos = frame  # el hilo de gestos lo toma cuando termine el anterior
                     self._ev_gestos.set()
@@ -3072,6 +3014,9 @@ class EduAccesibleApp:
                             color = (0, 255, 0) if clara else (255, 165, 0)
                             for (px, py) in puntos:
                                 cv2.circle(vista, (int(px * self.ANCHO_VIDEO), int(py * self.ALTO_VIDEO)), 4, color, -1)
+                    if self.modo_actual == "colores":  # zona de donde se toma el color
+                        cv2.rectangle(vista, (int(self.ANCHO_VIDEO * .38), int(self.ALTO_VIDEO * .38)),
+                                      (int(self.ANCHO_VIDEO * .62), int(self.ALTO_VIDEO * .62)), (255, 255, 255), 2)
                     if self.modo_actual == "figuras":  # zona guía: solo se analiza lo que quede adentro
                         cv2.rectangle(vista, (int(self.ANCHO_VIDEO * .08), int(self.ALTO_VIDEO * .08)),
                                       (int(self.ANCHO_VIDEO * .92), int(self.ALTO_VIDEO * .92)), (0, 200, 0), 2)
@@ -3152,7 +3097,7 @@ class EduAccesibleApp:
     def _salir_de_pantalla(self):
         """Al cambiar de pantalla: corta lo que se está leyendo y descarta resultados pendientes."""
         self._gen += 1
-        self.lectura.detener()
+        self.detener_lectura(borrar=True)
 
     def abrir_modo(self, modo):
         self._salir_de_pantalla()
@@ -3162,7 +3107,8 @@ class EduAccesibleApp:
         self.mostrar("modo")
         if modo == "objetos":
             self._asegurar_detector()  # que se vaya cargando mientras apuntas la cámara
-        self.voz.hablar(f"{MODOS[modo]}. Apunta la cámara y presiona capturar.")
+        self._buenos, self._avisado_centrado = 0, False
+        self.voz.hablar(f"{MODOS[modo]}. " + AYUDA_MODO.get(modo, "Apunta la cámara y presiona capturar."))
 
     def abrir_ajustes(self):
         self._salir_de_pantalla()
@@ -3176,6 +3122,8 @@ class EduAccesibleApp:
         self.voz.hablar("Materiales guardados.")
 
     def ir_inicio(self):
+        if self.pantalla == "bienvenida":
+            guardar_config(bienvenida_vista=True)
         self._salir_de_pantalla()
         self.mostrar("menu")
         self.voz.hablar("Menú principal.")
@@ -3186,53 +3134,34 @@ class EduAccesibleApp:
         else:
             self.ir_inicio()
 
-    def _decir(self, texto):
-        """Textos largos se leen por párrafos (con pausa, adelantar y retroceder); los cortos, de una vez."""
-        if len(texto) > 380:
-            self.lectura.iniciar(texto)
-        else:
-            self.lectura.detener()
-            self.voz.hablar(texto)
-
-    def silencio(self):
-        self.lectura.detener()
-
-    def pausar_lectura(self):
-        if self.lectura.pausada:
-            return self.continuar_lectura()
-        if self.lectura.pausar():
-            self.estado("⏸ Pausa. Di «continuar» o pulsa P.")
-        else:
-            self.voz.hablar("No hay nada que pausar.")
-
-    def continuar_lectura(self):
-        if self.lectura.continuar():
-            self.estado("▶ " + self.lectura.estado())
-        else:
-            self.voz.hablar("No hay una lectura para continuar.")
-
-    def mover_lectura(self, delta):
-        if self.lectura.mover(delta):
-            self.estado("📖 " + self.lectura.estado())
-        else:
-            self.voz.hablar("No hay un texto largo leyéndose.")
-
-    def cambiar_voz(self, vel=0, vol=0):
-        v, w = self.voz.ajustar(vel, vol)
-        if vel:
-            self.voz.hablar(f"Voz más {'rápida' if vel > 0 else 'lenta'}. Velocidad {v + 7} de 13.")
-        else:
-            self.voz.hablar(f"Volumen {w} por ciento.")
-
     def repetir(self):
         if self.ultimo_audio:
-            self._decir(self.ultimo_audio)
+            self._cargar_lectura(self.ultimo_audio, self._idioma_lectura)
         else:
             self.voz.hablar("Todavía no hay nada para repetir.")
 
     def tecla(self, event):
+        if event.widget.winfo_class() == "Entry":  # escribiendo en el buscador
+            return
         k = (event.char or "").lower()
-        if k == "c":
+        if k == "\r":
+            if self.pantalla == "bienvenida":
+                self.ir_inicio()
+        elif k == "p":
+            self.alternar_pausa()
+        elif k == "n":
+            self.siguiente_parrafo()
+        elif k == "b":
+            self.anterior_parrafo()
+        elif k in ("+", "="):
+            self.ajustar_velocidad(1)
+        elif k == "-":
+            self.ajustar_velocidad(-1)
+        elif self.pantalla == "mas" and k and k in "12345":
+            self.abrir_modo(MODOS_MAS[int(k) - 1])
+        elif self.pantalla == "perfiles" and k and k in "123456789" and int(k) <= len(self._perfiles_visibles):
+            self.elegir_perfil(self._perfiles_visibles[int(k) - 1])
+        elif k == "c":
             self.capturar()
         elif k == "r":
             self.repetir()
@@ -3253,20 +3182,12 @@ class EduAccesibleApp:
         elif k == "l":
             self.usar_mic_laptop()
         elif k == "s":
-            self.silencio()
-        elif k == "p":
-            self.pausar_lectura()
-        elif k == "n":
-            self.mover_lectura(1)
-        elif k == "b":
-            self.mover_lectura(-1)
-        elif k == "e":
-            self.alternar_encuadre()
+            self.silenciar()
         elif k in ("j", "?"):
             self.abrir_senas()
         elif self.pantalla == "menu" and k and k in "12345678":
             if k == "8":
-                self.abrir_modo("dinero")
+                self.abrir_mas()
             elif k == "6":
                 self.abrir_materiales()
             elif k == "7":
@@ -3292,17 +3213,13 @@ class EduAccesibleApp:
         frame = candidatos[int(np.argmax(nitidez))].copy()
         print(f"Nitidez de la captura: {max(nitidez):.0f} (menos de ~100 suele ser imagen borrosa)")
         cv2.imwrite(os.path.join(CARPETA_DEBUG, "captura.png"), frame)
-        if self.modo_actual in ("texto", "letras", "numeros", "dinero"):
-            aviso, ok = calidad_imagen(frame)
-            if not ok:
-                self.voz.hablar(aviso + " Aun así la voy a analizar.")
         self.lanzar_analisis(frame, self.modo_actual, desde_camara=True)
 
     def lanzar_analisis(self, frame, modo, desde_camara=False):
         if self.procesando:
             return
-        self.lectura.detener()
         self.procesando = True
+        self.detener_lectura(borrar=True)
         if not self.ocr.listo.is_set():
             self.voz.hablar("Cargando el lector. Un momento.")
         else:
@@ -3314,12 +3231,11 @@ class EduAccesibleApp:
     def _terminar(self):
         self.procesando = False
 
-    def anunciar(self, texto, guardar_modo=None):
+    def anunciar(self, texto, guardar_modo=None, idioma=None, intro=None):
         if self._gen_analisis is not None and self._gen_analisis != self._gen:
             return  # la persona ya salió de esa opción: no leer el resultado
         self.ultimo_audio = texto
-        self._decir(texto)
-        self.ui(lambda: self.lbl_resultado.config(text=texto))
+        self.ui(lambda: self._cargar_lectura(texto, idioma, intro))  # se lee párrafo por párrafo, resaltado
         if guardar_modo:
             self.guardar_material(guardar_modo, texto)
 
@@ -3335,8 +3251,16 @@ class EduAccesibleApp:
                 self._modo_figuras(frame, desde_camara)
             elif modo == "objetos":
                 self._modo_objetos(frame)
+            elif modo == "colores":
+                self._modo_colores(frame)
             elif modo == "dinero":
                 self._modo_dinero(frame)
+            elif modo == "operaciones":
+                self._modo_operaciones(frame)
+            elif modo == "diccionario":
+                self._modo_diccionario(frame)
+            elif modo == "traducir":
+                self._modo_traducir(frame)
         except Exception as e:
             print(f"Error al analizar: {e}")
             self.anunciar("Ocurrió un error al analizar la imagen.")
@@ -3351,29 +3275,30 @@ class EduAccesibleApp:
     def _leer(self, frame, psms, suficiente=30):
         texto, motor = self.ocr.texto(frame, psms, suficiente)
         print(f"DEBUG - motor {motor}: {texto!r}")
-        return self._limpiar(texto)
+        limpio = self._limpiar(texto)
+        if limpio:
+            self.ultimo_texto = limpio
+        return limpio
 
     def _modo_texto(self, frame):
         texto = self._leer(frame, psms=(6, 3))
         print(f"DEBUG - Texto final: '{texto}'")
         if len(texto) > 1:
-            self.ultimo_texto = texto
-            cuentas = operaciones_habladas(texto)
-            self.anunciar(f"El texto dice: {texto}" + (f" Cuentas que encontré: {cuentas}" if cuentas else ""), guardar_modo="texto")
+            self.anunciar(f"El texto dice: {texto}", guardar_modo="texto")
         else:
             self.anunciar("No se detectó texto. Acerca el papel, enfoca bien y usa buena luz.")
 
     def _modo_letras(self, frame):
         texto = self._leer(frame, psms=(6, 10), suficiente=8)
         palabras = texto.split()
+        if palabras:
+            self.ultima_palabra = re.sub(r"[^\wáéíóúüñÁÉÍÓÚÜÑ]", "", palabras[0])
         if not palabras:
             self.anunciar("No se detectaron letras. Usa letras grandes y oscuras sobre fondo claro.")
             return
         if len(texto.replace(" ", "")) == 1:
             self.anunciar(f"Letra {texto}", guardar_modo="letras")
             return
-        self.ultima_palabra = re.sub(r"[^\wáéíóúüñÁÉÍÓÚÜÑ]", "", palabras[0])
-        self.ultimo_texto = texto
         n = len(palabras)
         partes = [f"Se detectó {n} palabra." if n == 1 else f"Se detectaron {n} palabras."]
         for p in palabras[:5]:
@@ -3388,6 +3313,874 @@ class EduAccesibleApp:
         else:
             self.anunciar("No se detectó ningún número.")
 
+    def _modo_figuras(self, frame, desde_camara=False):
+        figuras = detectar_figuras(frame, recorte=desde_camara)
+        if not figuras:
+            self.anunciar("No se detectaron figuras. Coloca la figura sobre un fondo liso y con buena luz.")
+        elif len(figuras) == 1:
+            forma, color = figuras[0]
+            self.anunciar(f"Se detectó un {forma} {color}.")
+        else:
+            detalle = ", ".join(f"{forma} {color}" for forma, color in figuras)
+            self.anunciar(f"Se detectaron {len(figuras)} figuras, de izquierda a derecha: {detalle}.")
+
+    def _preparar_mic(self):
+        # En paralelo con el OCR: la voz es la entrada principal de la app y debe estar lista cuanto antes.
+        try:
+            self.mic.preparar(lambda t: self.voz.hablar(t))
+        finally:
+            self._mic_listo.set()
+        if leer_config().get("voz_continua") and self.mic.modelo is not None:
+            self.ui(lambda: self.alternar_voz_continua(True, silencioso=True))
+
+    def _asegurar_detector(self):
+        """Carga el detector de objetos la primera vez que se necesita (no al abrir la app)."""
+        if not self._detector_iniciado:
+            self._detector_iniciado = True
+            threading.Thread(target=self.detector.cargar, daemon=True).start()
+
+    def _modo_objetos(self, frame):
+        self._asegurar_detector()
+        if not self.detector.listo.is_set():
+            self.voz.hablar("Preparando el detector de objetos.")
+            self.detector.listo.wait(300)
+        if self.detector.error:
+            self.anunciar("El detector de objetos no está disponible. Conéctate a internet una vez para descargarlo.")
+            return
+        detecciones = self.detector.detectar(frame)
+        anotada = frame.copy()
+        for c, puntaje, (x1, y1, x2, y2) in detecciones:
+            cv2.rectangle(anotada, (x1, y1), (x2, y2), (0, 170, 0), 3)
+            cv2.putText(anotada, f"{CLASES_ES[c][0]} {puntaje:.0%}", (x1, max(y1 - 8, 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 120, 0), 2)
+        cv2.imwrite(os.path.join(CARPETA_DEBUG, "objetos.png"), anotada)
+        print(f"DEBUG - objetos: {[(CLASES_ES[c][0], round(p, 2)) for c, p, _ in detecciones]}")
+        if detecciones:
+            self.anunciar(frase_conteo(detecciones), guardar_modo="objetos")
+            return
+        # Sin objetos conocidos (el modelo no sabe de lápices, fichas, etc.): contar piezas de color sueltas
+        h, w = frame.shape[:2]
+        pequeno = cv2.resize(frame, (800, int(h * 800 / w)))
+        piezas = [a for a in _candidatos_figuras(pequeno) if a["color"] not in ("blanco", "negro", "gris")]
+        if piezas:
+            n = len(piezas)
+            self.anunciar(f"No reconocí objetos por su nombre, pero veo {n} pieza{'s' if n != 1 else ''} de color.",
+                          guardar_modo="objetos")
+        else:
+            self.anunciar("No se detectaron objetos. Acerca la cámara, usa buena luz y un fondo liso.")
+
+    # ----------------------------- Materiales -----------------------------
+    def guardar_material(self, modo, texto):
+        nombre = nombre_archivo_material(modo, texto)
+        try:
+            with open(os.path.join(self.carpeta_materiales(), nombre), "w", encoding="utf-8") as f:
+                f.write(texto)
+            self._cache_mat[nombre] = texto[:4000]
+            self.ui(self.refrescar_materiales)
+        except OSError as e:
+            print(f"No se pudo guardar el material: {e}")
+
+    def refrescar_materiales(self):
+        try:
+            archivos = [a for a in os.listdir(self.carpeta_materiales()) if a.endswith(".txt")]
+        except OSError:
+            archivos = []
+        favs = set(cfg_p("favoritos", []))
+        consulta = _sin_tildes(self.var_busqueda.get().strip())
+        filas = []
+        for a in archivos:
+            if consulta and consulta not in _sin_tildes(etiqueta_material(a)) and consulta not in _sin_tildes(self._contenido_material(a)):
+                continue
+            filas.append((a in favs, a))
+        filas.sort(key=lambda t: t[1], reverse=True)   # lo más nuevo primero...
+        filas.sort(key=lambda t: not t[0])             # ...y los favoritos arriba
+        self._materiales_visibles = [a for _, a in filas]
+        self.lista.delete(0, "end")
+        for fav, a in filas:
+            self.lista.insert("end", ("⭐ " if fav else "") + etiqueta_material(a))
+
+    def escuchar_material(self):
+        a = self._material_elegido()
+        if a is None:
+            return
+        with open(os.path.join(self.carpeta_materiales(), a), encoding="utf-8") as f:
+            self.anunciar(f.read())
+
+    def importar_imagen(self):
+        ruta = filedialog.askopenfilename(title="Importar imagen",
+                                          filetypes=[("Imágenes", "*.png *.jpg *.jpeg *.bmp")])
+        if not ruta:
+            return
+        frame = cv2.imdecode(np.fromfile(ruta, np.uint8), cv2.IMREAD_COLOR)  # soporta rutas con tildes
+        if frame is None:
+            messagebox.showerror("Imagen", "No se pudo abrir la imagen.")
+            return
+        modo = self.modo_actual if self.pantalla == "modo" else "texto"
+        self.lanzar_analisis(frame, modo)
+
+    def importar_documento(self):
+        ruta = filedialog.askopenfilename(
+            title="Importar documento",
+            filetypes=[("Documentos e imágenes", "*.pdf *.docx *.txt *.md *.csv *.png *.jpg *.jpeg *.bmp"),
+                       ("Documentos", "*.pdf *.docx *.txt *.md *.csv"), ("Todos", "*.*")])
+        if ruta:
+            self.abrir_archivo(ruta)
+
+    def abrir_archivo(self, ruta):
+        ext = os.path.splitext(ruta)[1].lower()
+        if ext in EXT_IMG:
+            frame = cv2.imdecode(np.fromfile(ruta, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                self.voz.hablar("No se pudo abrir la imagen.")
+                return
+            self.lanzar_analisis(frame, self.modo_actual if self.pantalla == "modo" else "texto")
+            return
+        if ext not in EXT_DOC:
+            self.voz.hablar("Ese tipo de archivo no es compatible. Usa PDF, Word, texto o imagen.")
+            return
+        if self.procesando:
+            return
+        self.procesando = True
+        self.detener_lectura(borrar=True)
+        self.voz.hablar("Abriendo el documento.")
+        self.lbl_resultado.config(text="Abriendo el documento...")
+        self._gen_analisis = self._gen
+        threading.Thread(target=self._leer_doc_hilo, args=(ruta,), daemon=True).start()
+
+    def _leer_doc_hilo(self, ruta):
+        try:
+            def ocr_pag(bgr):
+                if not self.ocr.listo.wait(60):
+                    return ""
+                return self._leer(bgr, (6, 3))
+
+            def prog(i, n):
+                self.ui(lambda: self.lbl_resultado.config(text=f"Leyendo página {i} de {n}..."))
+
+            texto = leer_documento(ruta, ocr_pag, prog)
+            if not texto:
+                self.anunciar("No encontré texto en este documento.")
+                return
+            if self._gen_analisis is not None and self._gen_analisis != self._gen:
+                return
+            self.ultimo_audio = texto
+            self.ui(lambda: self._cargar_lectura(texto))  # todo el documento, por párrafos y con resaltado
+            self.guardar_material("documento", texto)
+        except Exception as e:
+            print(f"Error al leer documento: {e}")
+            self.anunciar(f"No pude abrir el documento. {e}" if isinstance(e, ValueError) else "No pude abrir el documento. Puede estar dañado.")
+        finally:
+            self._gen_analisis = None
+            self.ui(self._terminar)
+
+    def vigilar_entrada(self):
+        """Conexión con dispositivos: todo archivo que se copie a la carpeta Entrada se recibe y se guarda en Materiales."""
+        try:
+            for a in os.listdir(CARPETA_ENTRADA):
+                ruta = os.path.join(CARPETA_ENTRADA, a)
+                if not os.path.isfile(ruta) or a in self._entrada_vista or not a.lower().endswith(EXT_DOC + EXT_IMG):
+                    continue
+                if time.time() - os.path.getmtime(ruta) < 2:  # aún se está copiando
+                    continue
+                self._entrada_vista.add(a)
+                self.voz.hablar(f"Llegó un archivo: {os.path.splitext(a)[0]}. Se abrirá ahora." if self.pantalla != "modo" or not self.procesando else f"Llegó un archivo: {a}.")
+                if not self.procesando:
+                    self.abrir_archivo(ruta)
+        except OSError:
+            pass
+        self.root.after(3000, self.vigilar_entrada)
+
+
+    def alternar_lento(self):
+        self.modo_lento = not self.modo_lento
+        guardar_config(lento=self.modo_lento)
+        if getattr(self, "btn_lento", None) is not None:
+            self.btn_lento.config(text="🐢  Modo equipo lento: " + ("activado" if self.modo_lento else "apagado"))
+        if self.modo_lento:
+            self.voz.hablar("Modo equipo lento activado. Cierra y abre la aplicación para que la cámara use menos resolución.")
+        else:
+            self.voz.hablar("Modo equipo lento apagado. Cierra y abre la aplicación para volver a la resolución normal.")
+
+    def texto_diagnostico(self):
+        def g(f, defecto="?"):
+            try:
+                return f()
+            except Exception:
+                return defecto
+        cap = getattr(self, "_cap", None)
+        res = g(lambda: f"{int(cap.get(3))}x{int(cap.get(4))}") if cap is not None else "sin cámara"
+        lector = getattr(self, "lector", None)
+        lineas = [
+            f"EduAccesible {VERSION_APP} - diagnóstico",
+            f"Windows: {g(lambda: sys.getwindowsversion().build, '?')} | Python {sys.version.split()[0]} | OpenCV {cv2.__version__} | núcleos {os.cpu_count()}",
+            f"Modo equipo lento: {'sí' if self.modo_lento else 'no'}",
+            f"Perfil: {self.perfil} | {self._info_voz()} | contraste {'sí' if ALTO_CONTRASTE else 'no'} | letra grande {'sí' if ESCALA_FUENTE > 1 else 'no'} | resaltado de palabras {'sí' if getattr(self.voz, 'eventos', False) else 'no'}",
+            f"Cámara: {getattr(self, 'indice_camara', '?')} | resolución real {res} | cuadros/s {g(lambda: f'{lector.fps:.0f}') if lector else 'sin lector'}",
+            f"Gestos: {'activos' if self.gestos_activos else 'apagados'} | análisis/s {g(lambda: f'{self._fps_gestos:.0f}')} | MediaPipe {'disponible' if MP_MANOS is not None else 'NO disponible: ' + MP_ERROR}",
+            f"Estado de gestos: {g(lambda: self._texto_gestos)}",
+            f"Voz que habla: {getattr(self.voz, 'descripcion', '?')} | español instalado: {'sí' if getattr(self.voz, 'hay_espanol', True) else 'NO'}",
+            f"Voz continua: {'activa' if self.voz_continua else 'apagada'} | modelo de voz cargado: {'sí' if getattr(self.mic, 'modelo', None) is not None else 'no'}",
+            f"Lector de texto listo: {'sí' if g(lambda: self.ocr.listo.is_set(), False) else 'todavía no'}",
+            f"Wi-Fi: {'activo ' + self.wifi.url if self.wifi and self.wifi.activo() else 'apagado'}",
+            f"Carpeta: {BASE_DIR}",
+            "",
+            "--- Registro (últimas líneas) ---",
+            cola_registro(150),
+        ]
+        return "\n".join(lineas)
+
+    def abrir_diagnostico(self):
+        print("--- Diagnóstico abierto ---")
+        texto = self.texto_diagnostico()
+        v = tk.Toplevel(self.root)
+        v.title("Diagnóstico de EduAccesible")
+        v.geometry("820x560")
+        v.configure(bg=CREMA)
+        marco = tk.Frame(v, bg=CREMA)
+        marco.pack(fill="both", expand=True, padx=10, pady=10)
+        barra = tk.Scrollbar(marco)
+        barra.pack(side="right", fill="y")
+        caja = tk.Text(marco, wrap="word", font=("Consolas", 10), yscrollcommand=barra.set, bg=CAJA_BG, fg=CAJA_FG)
+        caja.pack(side="left", fill="both", expand=True)
+        barra.config(command=caja.yview)
+        caja.insert("1.0", texto)
+        caja.see("end")
+
+        def copiar():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(texto)
+            self.voz.hablar("Diagnóstico copiado. Pégalo en un mensaje para enviarlo.")
+
+        def abrir_carpeta():
+            try:
+                os.startfile(CARPETA_DEBUG)
+            except Exception:
+                messagebox.showinfo("Diagnóstico", f"Carpeta: {CARPETA_DEBUG}")
+        fila = tk.Frame(v, bg=CREMA)
+        fila.pack(pady=(0, 10))
+        self.boton(fila, "📋 Copiar todo", VERDE, copiar, fuente=12).pack(side="left", padx=6, ipady=4, ipadx=10)
+        self.boton(fila, "📂 Abrir carpeta del registro", NARANJA, abrir_carpeta, fuente=12).pack(side="left", padx=6, ipady=4, ipadx=10)
+        self.boton(fila, "Cerrar", AMARILLO, v.destroy, fg=TEXTO, fuente=12).pack(side="left", padx=6, ipady=4, ipadx=10)
+
+    def alternar_wifi(self):
+        if self.wifi.activo():
+            self.wifi.detener()
+            self._cerrar_qr_wifi()
+            self.voz.hablar("Recepción por Wi-Fi apagada.")
+            self.lbl_resultado.config(text="Recepción por Wi-Fi apagada.")
+            return
+        try:
+            self.wifi.iniciar()
+        except OSError as e:
+            self.voz.hablar("No se pudo activar el Wi-Fi. Puede que el puerto esté ocupado.")
+            print(e)
+            return
+        c = " ".join(self.wifi.codigo)
+        t = f"Para enviar archivos, escanea el código QR o abre en el celular la dirección {self.wifi.url} y escribe el código {self.wifi.codigo}."
+        self.lbl_resultado.config(text=t)
+        self._mostrar_qr_wifi()
+        self.voz.hablar(f"Recepción por Wi-Fi activa. En la pantalla hay un código QR: escanéalo con la cámara del celular. O abre el navegador y escribe {self.wifi.url.replace('http://', '').replace('.', ' punto ').replace(':', ' dos puntos ')}. El código es {c}. Si Windows pregunta por el firewall, elige Permitir.")
+
+    def abrir_entrada(self):
+        try:
+            os.startfile(CARPETA_ENTRADA)
+        except Exception:
+            messagebox.showinfo("Entrada", f"Carpeta: {CARPETA_ENTRADA}")
+
+    def compartir_texto(self):
+        t = getattr(self, "ultimo_audio", "") or ""
+        if not t:
+            self.voz.hablar("Todavía no hay nada para compartir.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(t)
+        ruta = filedialog.asksaveasfilename(title="Guardar texto leído", defaultextension=".txt", filetypes=[("Texto", "*.txt")])
+        if ruta:
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write(t)
+            self.voz.hablar("Texto guardado.")
+        else:
+            self.voz.hablar("Texto copiado. Puedes pegarlo en otro programa.")
+
+    def abrir_carpeta(self):
+        try:
+            os.startfile(self.carpeta_materiales())
+        except Exception:
+            messagebox.showinfo("Materiales", f"Carpeta: {self.carpeta_materiales()}")
+
+    # ======================= v8: lectura por párrafos =========================
+    def _caja(self):
+        return self.txt_bienvenida if self.pantalla == "bienvenida" else self.lbl_resultado
+
+    def _cargar_lectura(self, texto, idioma=None, intro=None):
+        """Carga el texto, lo muestra y empieza a leerlo párrafo por párrafo."""
+        self.detener_lectura()
+        self.parrafos.cargar(texto)
+        self._idioma_lectura = idioma
+        try:
+            self._caja().config(text=self.parrafos.texto)
+        except tk.TclError:
+            pass
+        if intro:
+            self.voz.hablar(intro)
+        self.iniciar_lectura(0, limpiar=False)
+
+    def iniciar_lectura(self, desde=None, limpiar=True):
+        p = self.parrafos
+        if not p.hay():
+            return
+        if desde is not None:
+            p.indice = max(0, min(desde, len(p.parrafos) - 1))
+        with self._cerrojo_lectura:
+            self._gen_lectura += 1
+            gen = self._gen_lectura
+        if limpiar:
+            self.voz.detener()
+        self.leyendo, self.en_pausa = True, False
+        self._texto_btn_pausa()
+        threading.Thread(target=self._hilo_lectura, args=(gen,), daemon=True).start()
+
+    def _hilo_lectura(self, gen):
+        p = self.parrafos
+        while True:
+            with self._cerrojo_lectura:
+                if gen != self._gen_lectura:
+                    return
+                i = p.indice
+                if i >= len(p.parrafos):
+                    break
+                self._parrafo_hablando = i
+                self.voz.hablar(p.parrafos[i], self._idioma_lectura)
+            self.ui(lambda i=i, g=gen: self._mostrar_parrafo(i, g))
+            t0 = time.time()
+            while gen == self._gen_lectura:
+                time.sleep(0.08)
+                if time.time() - t0 > 0.4 and not self.voz.ocupada():
+                    break
+            with self._cerrojo_lectura:
+                if gen != self._gen_lectura:
+                    return
+                p.indice += 1
+        with self._cerrojo_lectura:
+            if gen == self._gen_lectura:
+                self.leyendo = False
+        self.ui(lambda g=gen: self._fin_lectura(g))
+
+    def _mostrar_parrafo(self, i, gen):
+        if gen != self._gen_lectura or i >= len(self.parrafos.parrafos):
+            return
+        try:
+            self._caja().resaltar_parrafo(*self.parrafos.rango(i))
+        except tk.TclError:
+            pass
+        self.lbl_estado.config(text=f"🔊 Párrafo {i + 1} de {len(self.parrafos.parrafos)}")
+
+    def _fin_lectura(self, gen):
+        if gen == self._gen_lectura:
+            try:
+                self._caja().quitar_resaltado()
+            except tk.TclError:
+                pass
+            self._texto_btn_pausa()
+            self.lbl_estado.config(text="Lectura terminada. Presiona Repetir para leer otra vez.")
+
+    def _resaltar_palabra(self, pos, largo):
+        i = self._parrafo_hablando
+        if self.leyendo and i < len(self.parrafos.inicios):
+            try:
+                self._caja().resaltar_palabra(self.parrafos.inicios[i] + pos, largo)
+            except tk.TclError:
+                pass
+
+    def detener_lectura(self, borrar=False):
+        with self._cerrojo_lectura:
+            self._gen_lectura += 1
+        self.leyendo, self.en_pausa = False, False
+        self.voz.detener()
+        if borrar:
+            self.parrafos.cargar("")
+        try:
+            self._caja().quitar_resaltado()
+        except Exception:
+            pass
+        self._texto_btn_pausa()
+
+    def pausar_lectura(self, avisar=True):
+        if not self.leyendo:
+            if avisar:
+                self.voz.hablar("Ya está en pausa." if self.en_pausa else "No hay nada leyéndose.")
+            return
+        with self._cerrojo_lectura:
+            self._gen_lectura += 1
+        self.leyendo, self.en_pausa = False, True
+        self.voz.detener()
+        try:
+            self._caja().tag_remove("palabra", "1.0", "end")
+        except Exception:
+            pass
+        if avisar:
+            self.voz.hablar("Pausa.")
+        n = len(self.parrafos.parrafos)
+        self.lbl_estado.config(text=f"⏸ En pausa en el párrafo {self.parrafos.indice + 1} de {n}. Di continuar o presiona P.")
+        self._texto_btn_pausa()
+
+    def continuar_lectura(self):
+        if self.leyendo:
+            self.voz.hablar("Ya estoy leyendo.")
+        elif not self.parrafos.hay() or self.parrafos.terminado():
+            self.voz.hablar("No hay nada para continuar. Usa repetir para leer otra vez.")
+        else:
+            self.iniciar_lectura()
+
+    def alternar_pausa(self):
+        self.pausar_lectura() if self.leyendo else self.continuar_lectura()
+
+    def silenciar(self):
+        """Silencio: si se está leyendo, queda en pausa (se puede continuar)."""
+        self.pausar_lectura(avisar=False) if self.leyendo else self.voz.detener()
+
+    def siguiente_parrafo(self):
+        p = self.parrafos
+        if not p.hay():
+            self.voz.hablar("No hay texto para recorrer.")
+        elif p.indice >= len(p.parrafos) - 1:
+            self.voz.hablar("Es el último párrafo.")
+        else:
+            self.iniciar_lectura(p.indice + 1)
+
+    def anterior_parrafo(self):
+        p = self.parrafos
+        if not p.hay():
+            self.voz.hablar("No hay texto para recorrer.")
+        elif p.terminado():
+            self.iniciar_lectura(len(p.parrafos) - 1)
+        else:
+            self.iniciar_lectura(max(0, p.indice - 1))
+
+    def _texto_btn_pausa(self):
+        b = getattr(self, "btn_pausa", None)
+        if b is not None:
+            try:
+                b.config(text="⏸ Pausa" if self.leyendo else "▶ Seguir")
+            except tk.TclError:
+                pass
+
+    # ---- velocidad y volumen de la voz
+    @staticmethod
+    def nombre_velocidad(v):
+        return "muy lenta" if v <= -5 else "lenta" if v <= -2 else "normal" if v <= 0 else "rápida" if v <= 3 else "muy rápida"
+
+    def _info_voz(self):
+        return f"Voz: velocidad {self.nombre_velocidad(self.voz.velocidad)}  ·  volumen {self.voz.volumen}%"
+
+    def _decir_y_seguir(self, frase):
+        seguir, idx = self.leyendo, self.parrafos.indice
+        self.detener_lectura()
+        self.voz.hablar(frase)
+        if seguir:
+            self.iniciar_lectura(idx, limpiar=False)
+        lbl = getattr(self, "lbl_voz_info", None)
+        if lbl is not None:
+            lbl.config(text=self._info_voz())
+
+    def ajustar_velocidad(self, delta):
+        v = max(-8, min(8, self.voz.velocidad + delta))
+        if v == self.voz.velocidad:
+            self.voz.hablar("Ya está en la velocidad más " + ("lenta." if delta < 0 else "rápida."))
+            return
+        self.voz.velocidad = v
+        guardar_p(velocidad=v)
+        self._decir_y_seguir(f"Velocidad {self.nombre_velocidad(v)}.")
+
+    def ajustar_volumen(self, delta):
+        v = max(10, min(100, self.voz.volumen + delta))
+        if v == self.voz.volumen:
+            self.voz.hablar("Ya está en el volumen " + ("mínimo." if delta < 0 else "máximo."))
+            return
+        self.voz.volumen = v
+        guardar_p(volumen=v)
+        self._decir_y_seguir(f"Volumen al {v} por ciento.")
+
+    # ---- alto contraste, letra grande, encuadre
+    def aplicar_tema(self):
+        contraste, grande = bool(cfg_p("contraste", False)), bool(cfg_p("letra_grande", False))
+        if contraste != ALTO_CONTRASTE or grande != (ESCALA_FUENTE > 1.0):
+            configurar_tema(contraste, grande)
+            self.root.after(10, self.reconstruir_interfaz)
+
+    def reconstruir_interfaz(self):
+        actual = self.pantalla
+        for w in self.root.winfo_children():
+            w.destroy()
+        self.root.config(bg=CREMA)
+        try:
+            self.root.attributes("-zoomed", ESCALA_FUENTE > 1.0)
+        except tk.TclError:
+            try:
+                self.root.state("zoomed" if ESCALA_FUENTE > 1.0 else "normal")
+            except tk.TclError:
+                pass
+        self.btn_pausa = None
+        self._construir_interfaz()
+        self.mostrar(actual if actual in self.pantallas else "menu")
+        if actual == "modo":
+            self.lbl_titulo_modo.config(text=MODOS[self.modo_actual])
+        if self.parrafos.hay():
+            self.lbl_resultado.config(text=self.parrafos.texto)
+        self._refrescar_botones_ajustes()
+
+    def _refrescar_botones_ajustes(self):
+        self._texto_boton_gestos("activados" if self.gestos_activos else "apagados")
+        self._texto_boton_voz("activa" if self.voz_continua else "apagada")
+        self._texto_btn_pausa()
+        for nombre, texto in (("btn_contraste", "🎨  Alto contraste: " + ("activado" if cfg_p("contraste", False) else "apagado")),
+                              ("btn_letra", "🔠  Letra grande: " + ("activada" if cfg_p("letra_grande", False) else "apagada")),
+                              ("btn_encuadre", "🎯  Ayuda para encuadrar: " + ("activada" if self.ayuda_encuadre else "apagada")),
+                              ("btn_idioma", f"🌐  Traducir al: {IDIOMAS.get(cfg_p('idioma', 'en'), 'inglés')}"),
+                              ("btn_lento", "🐢  Modo equipo lento: " + ("activado" if self.modo_lento else "apagado")),
+                              ("btn_actualizar", f"⬇  Actualizar a {self.nueva_version[0]}" if self.nueva_version else "⬇  Buscar actualización")):
+            b = getattr(self, nombre, None)
+            if b is not None:
+                b.config(text=texto)
+
+    def alternar_contraste(self):
+        nuevo = not cfg_p("contraste", False)
+        guardar_p(contraste=nuevo)
+        self.voz.hablar("Alto contraste activado." if nuevo else "Alto contraste apagado.")
+        self.aplicar_tema()
+        self._refrescar_botones_ajustes()
+
+    def alternar_letra_grande(self):
+        nuevo = not cfg_p("letra_grande", False)
+        guardar_p(letra_grande=nuevo)
+        self.voz.hablar("Letra grande activada." if nuevo else "Letra grande apagada.")
+        self.aplicar_tema()
+        self._refrescar_botones_ajustes()
+
+    def alternar_encuadre(self):
+        self.ayuda_encuadre = not self.ayuda_encuadre
+        guardar_p(encuadre=self.ayuda_encuadre)
+        self._refrescar_botones_ajustes()
+        self.voz.hablar("Ayuda para encuadrar activada." if self.ayuda_encuadre else "Ayuda para encuadrar apagada.")
+
+    def cambiar_idioma(self):
+        orden = ["en", "fr", "pt", "it", "de"]
+        actual = cfg_p("idioma", "en")
+        nuevo = orden[(orden.index(actual) + 1) % len(orden)] if actual in orden else "en"
+        guardar_p(idioma=nuevo)
+        self._refrescar_botones_ajustes()
+        self.voz.hablar(f"Se traducirá al {IDIOMAS[nuevo]}.")
+
+    def _ayuda_encuadre(self, frame):
+        """Cada ~0,8 s mide brillo, nitidez y centrado; avisa por voz lo que falte y, si todo va bien, da un tono que sube cuando la hoja está centrada."""
+        ahora = time.time()
+        if not self.ayuda_encuadre or self.procesando or ahora < self._t_encuadre:
+            return
+        self._t_encuadre = ahora + (1.6 if self.modo_lento else 0.8)
+        if self.escuchando or self.leyendo or self.voz.ocupada():
+            return
+        hoja = self.modo_actual in ("texto", "letras", "numeros", "operaciones", "diccionario", "traducir")
+        info = evaluar_encuadre(frame)
+        msg = mensaje_encuadre(info, hoja)
+        if msg:
+            self._buenos = 0
+            if msg != self._ultimo_aviso_enc or ahora - self._t_aviso_enc > 7:
+                self._ultimo_aviso_enc, self._t_aviso_enc = msg, ahora
+                self.voz.hablar(msg)
+            return
+        self._ultimo_aviso_enc = ""
+        if not hoja or info["centrado"] <= 0.15:
+            return
+        if winsound is not None and not self._pitando:
+            threading.Thread(target=self._pitido, args=(tono_encuadre(info["centrado"]),), daemon=True).start()
+        if info["centrado"] >= 0.75:
+            self._buenos += 1
+            if self._buenos >= 2 and not self._avisado_centrado:
+                self._avisado_centrado = True
+                self.voz.hablar("Bien centrado. Ya puedes capturar.")
+        else:
+            self._buenos = 0
+            if info["centrado"] < 0.5:
+                self._avisado_centrado = False
+
+    def _pitido(self, frecuencia):
+        self._pitando = True
+        try:
+            winsound.Beep(frecuencia, 70)
+        except Exception:
+            pass
+        finally:
+            self._pitando = False
+
+    # ============================ v8: pantallas nuevas ========================
+    def _pantalla_bienvenida(self):
+        f = tk.Frame(self.contenido, bg=CREMA)
+        tk.Label(f, text="Bienvenido", font=F(22, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 6))
+        marco = tk.Frame(f, bg=CREMA)
+        marco.pack(fill="both", expand=True, padx=10)
+        sb = tk.Scrollbar(marco)
+        sb.pack(side="right", fill="y")
+        self.txt_bienvenida = CajaResultado(marco, font=F(14), height=14, bg=CAJA_BG, fg=CAJA_FG, yscrollcommand=sb.set,
+                                            padx=8, pady=6)
+        self.txt_bienvenida.pack(side="left", fill="both", expand=True)
+        sb.config(command=self.txt_bienvenida.yview)
+        fila = tk.Frame(f, bg=CREMA)
+        fila.pack(pady=8)
+        self.boton(fila, "▶ Escuchar otra vez", NARANJA, lambda: self._cargar_lectura(TEXTO_BIENVENIDA), fuente=12).pack(
+            side="left", padx=6, ipady=6, ipadx=10)
+        self.boton(fila, "✔ Empezar (Enter)", VERDE, self.ir_inicio, fuente=12).pack(side="left", padx=6, ipady=6, ipadx=10)
+        return f
+
+    def abrir_bienvenida(self):
+        self._salir_de_pantalla()
+        self.mostrar("bienvenida")
+        self._cargar_lectura(TEXTO_BIENVENIDA)
+
+    def _pantalla_mas(self):
+        ext, f = self._marco_scroll()
+        tk.Label(f, text="Más herramientas", font=F(18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(5, 10))
+        for texto, color, fg, modo in [("🎨  1. Reconocer colores", VERDE, "white", "colores"),
+                                       ("💵  2. Billetes", NARANJA, "white", "dinero"),
+                                       ("➕  3. Operaciones escritas", AMARILLO, TEXTO, "operaciones"),
+                                       ("📚  4. Diccionario", VERDE, "white", "diccionario"),
+                                       ("🌐  5. Traducir", NARANJA, "white", "traducir")]:
+            self.boton(f, texto, color, lambda m=modo: self.abrir_modo(m), fg=fg, fuente=16).pack(fill="x", padx=20, pady=5, ipady=9)
+        tk.Label(f, text="Teclas 1 a 5. También puedes decir: colores, billetes, operaciones, diccionario o traducir.",
+                 font=F(10), fg=TEXTO, bg=CREMA, wraplength=620).pack(pady=8)
+        return ext
+
+    def abrir_mas(self):
+        self._salir_de_pantalla()
+        self.mostrar("mas")
+        self.voz.hablar("Más herramientas. Uno, colores. Dos, billetes. Tres, operaciones. Cuatro, diccionario. Cinco, traducir.")
+
+    def _pantalla_perfiles(self):
+        f = tk.Frame(self.contenido, bg=CREMA)
+        tk.Label(f, text="¿Quién va a usar EduAccesible?", font=F(18, "bold"), fg=VERDE, bg=CREMA).pack(pady=(0, 8))
+        self.caja_perfiles = tk.Frame(f, bg=CREMA)
+        self.caja_perfiles.pack(fill="x")
+        fila = tk.Frame(f, bg=CREMA)
+        fila.pack(pady=10)
+        self.boton(fila, "➕ Nuevo perfil", AMARILLO, self.nuevo_perfil, fg=TEXTO, fuente=12).pack(side="left", padx=6, ipady=5, ipadx=10)
+        self.boton(fila, "🗑 Quitar un perfil", AMARILLO, self.quitar_perfil, fg=TEXTO, fuente=12).pack(side="left", padx=6, ipady=5, ipadx=10)
+        return f
+
+    def abrir_perfiles(self):
+        self._salir_de_pantalla()
+        for w in self.caja_perfiles.winfo_children():
+            w.destroy()
+        self._perfiles_visibles = lista_perfiles()[:9]
+        for i, n in enumerate(self._perfiles_visibles, 1):
+            self.boton(self.caja_perfiles, f"{i}.  {n}" + ("   (actual)" if n == self.perfil else ""), VERDE if i % 2 else NARANJA,
+                       lambda n=n: self.elegir_perfil(n), fuente=16).pack(fill="x", padx=20, pady=4, ipady=8)
+        self.mostrar("perfiles")
+        self.voz.hablar("¿Quién va a usar EduAccesible? " + ". ".join(
+            f"Presiona {i} para {n}" for i, n in enumerate(self._perfiles_visibles, 1)) + ".")
+
+    def elegir_perfil(self, nombre):
+        guardar_config(perfil_actual=nombre)
+        self.perfil = nombre
+        self.voz.recargar_ajustes()
+        self.ayuda_encuadre = bool(cfg_p("encuadre", True))
+        self._cache_mat = {}
+        self.aplicar_tema()
+        self._salir_de_pantalla()
+        self.mostrar("menu")
+        self._refrescar_botones_ajustes()
+        self.voz.hablar(f"Perfil {nombre}. Menú principal.")
+
+    def nuevo_perfil(self):
+        nombre = simpledialog.askstring("Nuevo perfil", "Nombre del estudiante:", parent=self.root)
+        nombre = re.sub(r"[^\w\- ]", "", nombre or "").strip()[:30]
+        if not nombre:
+            return
+        perfiles = leer_config().get("perfiles", {})
+        perfiles.setdefault(nombre, {})
+        guardar_config(perfiles=perfiles)
+        carpeta_materiales_perfil(nombre)
+        self.elegir_perfil(nombre)
+
+    def quitar_perfil(self):
+        nombre = simpledialog.askstring("Quitar perfil", "Escribe el nombre del perfil que quieres quitar.\n"
+                                        "Sus materiales se conservan en la carpeta.", parent=self.root)
+        perfiles = leer_config().get("perfiles", {})
+        if not nombre or nombre == "General" or nombre == self.perfil or nombre not in perfiles:
+            messagebox.showinfo("Perfiles", "No se puede quitar ese perfil (el actual y General se conservan).")
+            return
+        perfiles.pop(nombre)
+        guardar_config(perfiles=perfiles)
+        self.abrir_perfiles()
+
+    # ======================== v8: Wi-Fi con código QR =========================
+    def _mostrar_qr_wifi(self):
+        try:
+            img = qr_imagen(f"{self.wifi.url}/?k={self.wifi.codigo}", modulo=7)
+        except Exception as e:
+            print(f"No se pudo generar el código QR: {e}")
+            return
+        self._cerrar_qr_wifi()
+        v = tk.Toplevel(self.root)
+        v.title("Recibir por Wi-Fi")
+        v.configure(bg=CREMA)
+        self._ventana_wifi = v
+        foto = ImageTk.PhotoImage(img)
+        lbl = tk.Label(v, image=foto, bg="white")
+        lbl.image = foto
+        lbl.pack(padx=20, pady=(16, 6))
+        tk.Label(v, text="Escanea el código con la cámara del celular", font=F(13, "bold"), fg=TEXTO, bg=CREMA).pack()
+        tk.Label(v, text=f"O abre {self.wifi.url} y escribe el código {self.wifi.codigo}", font=F(13), fg=TEXTO, bg=CREMA,
+                 wraplength=360).pack(pady=6)
+        self.boton(v, "Cerrar", VERDE, self._cerrar_qr_wifi, fuente=12).pack(pady=(0, 14), ipady=4, ipadx=14)
+
+    def _cerrar_qr_wifi(self):
+        v, self._ventana_wifi = getattr(self, "_ventana_wifi", None), None
+        if v is not None:
+            try:
+                v.destroy()
+            except tk.TclError:
+                pass
+
+    # ===================== v8: versión nueva y autoprueba =====================
+    def _buscar_version(self):
+        url = leer_config().get("url_version") or URL_VERSION
+        if not url:
+            return
+        try:
+            d = consultar_version(url)
+            nueva = str(d.get("version", ""))
+            if nueva and hay_version_nueva(VERSION_APP, nueva) and leer_config().get("version_avisada") != nueva:
+                guardar_config(version_avisada=nueva)
+                self.estado(f"🆕 Hay una versión nueva: {nueva}. {d.get('url', '')}")
+                self.voz.hablar(f"Hay una versión nueva de EduAccesible, la {nueva}. Pide a alguien que la instale." +
+                                (f" {d['novedades']}" if d.get("novedades") else ""))
+        except Exception as e:
+            print(f"No se pudo buscar la versión nueva: {e}")
+
+    def autoprueba(self, manual=False):
+        threading.Thread(target=self._autoprueba, args=(manual,), daemon=True).start()
+
+    def _autoprueba(self, manual=False):
+        if not manual:  # esperar a que termine de cargar todo (la primera vez el modelo de voz se descarga)
+            self.ocr.listo.wait(60)
+            self._camara_lista.wait(30)
+            self._mic_listo.wait(120)
+            for _ in range(50):
+                if self.voz.descripcion != "(iniciando)":
+                    break
+                time.sleep(0.2)
+        try:
+            hay_mic = (sd is not None and bool(self.mic.listar_microfonos())) or isinstance(self.mic.dispositivo, str)
+        except Exception:
+            hay_mic = False
+        estado = {"camara": self._cap is not None, "microfono": hay_mic,
+                  "reconocimiento": self.mic.modelo is not None or sr is not None,
+                  "voz_es": self.voz.hay_espanol,
+                  "lector": self.ocr.listo.is_set() and (self.ocr.rapid is not None or os.path.exists(RUTA_TESSERACT))}
+        faltan = resumen_autoprueba(estado)
+        print(f"Autoprueba: {estado} -> faltan {len(faltan)}")
+        if faltan:
+            self.estado("⚠ " + " ".join(faltan)[:150])
+            self.voz.hablar("Revisé el equipo. " + " ".join(faltan))
+        elif manual:
+            self.voz.hablar("Revisé el equipo y todo está listo: cámara, micrófono, voz en español y lector.")
+
+    # ============================ v8: materiales ==============================
+    def carpeta_materiales(self):
+        return carpeta_materiales_perfil(self.perfil)
+
+    def _contenido_material(self, a):
+        if a not in self._cache_mat:
+            try:
+                with open(os.path.join(self.carpeta_materiales(), a), encoding="utf-8") as f:
+                    self._cache_mat[a] = f.read(4000)
+            except OSError:
+                self._cache_mat[a] = ""
+        return self._cache_mat[a]
+
+    def _material_elegido(self):
+        sel = self.lista.curselection()
+        if not sel or sel[0] >= len(self._materiales_visibles):
+            self.voz.hablar("Selecciona un material de la lista.")
+            return None
+        return self._materiales_visibles[sel[0]]
+
+    def alternar_favorito(self):
+        a = self._material_elegido()
+        if a is None:
+            return
+        favs = list(cfg_p("favoritos", []))
+        if a in favs:
+            favs.remove(a)
+            self.voz.hablar("Quitado de favoritos.")
+        else:
+            favs.append(a)
+            self.voz.hablar("Guardado en favoritos.")
+        guardar_p(favoritos=favs)
+        self.refrescar_materiales()
+
+    def borrar_material(self):
+        a = self._material_elegido()
+        if a is None:
+            return
+        self.voz.hablar("¿Borrar este material? Responde en la ventana.")
+        if not messagebox.askyesno("Borrar", f"¿Borrar «{etiqueta_material(a)}»?", parent=self.root):
+            return
+        try:
+            os.remove(os.path.join(self.carpeta_materiales(), a))
+            self._cache_mat.pop(a, None)
+            self.voz.hablar("Material borrado.")
+        except OSError as e:
+            print(f"No se pudo borrar: {e}")
+            self.voz.hablar("No se pudo borrar.")
+        self.refrescar_materiales()
+
+    # ====================== v8: herramientas educativas =======================
+    def _modo_colores(self, frame):
+        self.anunciar(describir_color_centro(frame)[1])
+
+    def _modo_dinero(self, frame):
+        self.anunciar(frase_billetes(reconocer_billetes(frame)))
+
+    def _modo_operaciones(self, frame):
+        texto = self._leer(frame, psms=(6, 3))
+        ops = calcular_operaciones(texto)
+        if not ops:
+            self.anunciar("No encontré ninguna operación. Escribe con letra grande, por ejemplo 3 + 4.")
+            return
+        partes = [f"Operación {i}: {o['frase']}" if len(ops) > 1 else o["frase"] for i, o in enumerate(ops, 1)]
+        self.anunciar(" ".join(partes), guardar_modo="operaciones")
+
+    def _modo_diccionario(self, frame):
+        texto = self._leer(frame, psms=(6, 10), suficiente=8)
+        palabra = palabra_para_definir(texto)
+        if not palabra:
+            self.anunciar("No encontré ninguna palabra. Apunta la cámara a una sola palabra.")
+            return
+        self.voz.hablar(f"Busco {palabra}.")
+        definicion, fuente = definir_palabra(palabra)
+        if not definicion:
+            self.anunciar(f"No encontré el significado de {palabra}. Sin internet solo conozco palabras básicas.")
+            return
+        extra = " Leí varias palabras; busqué la primera." if len(texto.split()) > 1 else ""
+        self.anunciar(definicion + extra, guardar_modo="diccionario")
+        print(f"Diccionario: {palabra} ({fuente})")
+
+    def _modo_traducir(self, frame):
+        texto = self._leer(frame, psms=(6, 3))
+        if len(texto) < 2:
+            self.anunciar("No se detectó texto para traducir. Acerca el papel y usa buena luz.")
+            return
+        origen = detectar_idioma(texto)
+        destino = cfg_p("idioma", "en") if origen == "es" else "es"
+        if origen == destino:
+            destino = "es"
+        trad = traducir_texto(texto, origen, destino)
+        if not trad:
+            self.anunciar("La traducción necesita internet. Conéctate e inténtalo de nuevo.")
+            return
+        self.anunciar(trad, guardar_modo="traducir", idioma=destino, intro=f"Del {IDIOMAS[origen]} al {IDIOMAS[destino]}.")
+
+    # ===== v11: dinero, significado, traducción, cámara y actualización (del exe v9) =====
     def _leer_moneda(self, recorte):
         """Número que lleva una moneda (recorte del círculo), con el contraste mejorado."""
         g = cv2.cvtColor(recorte, cv2.COLOR_BGR2GRAY)
@@ -3441,270 +4234,11 @@ class EduAccesibleApp:
             frase += self._sumar_dinero(valor)
         self.anunciar(frase)
 
-    def _modo_figuras(self, frame, desde_camara=False):
-        figuras = detectar_figuras(frame, recorte=desde_camara)
-        if not figuras:
-            self.anunciar("No se detectaron figuras. Coloca la figura sobre un fondo liso y con buena luz.")
-        elif len(figuras) == 1:
-            forma, color = figuras[0]
-            self.anunciar(f"Se detectó un {forma} {color}.")
-        else:
-            detalle = ", ".join(f"{forma} {color}" for forma, color in figuras)
-            self.anunciar(f"Se detectaron {len(figuras)} figuras, de izquierda a derecha: {detalle}.")
-
-    def _preparar_mic(self):
-        # En paralelo con el OCR (antes esperaba a que el OCR terminara + 2 s): la voz es la entrada principal de la
-        # app y debe estar lista cuanto antes. Corre en su propio hilo, así que no frena la ventana.
-        self.mic.preparar(lambda t: self.voz.hablar(t))
-        if leer_config().get("voz_continua") and self.mic.modelo is not None:
-            self.ui(lambda: self.alternar_voz_continua(True, silencioso=True))
-
-    def _asegurar_detector(self):
-        """Carga el detector de objetos la primera vez que se necesita (no al abrir la app)."""
-        if not self._detector_iniciado:
-            self._detector_iniciado = True
-            threading.Thread(target=self.detector.cargar, daemon=True).start()
-
-    def _modo_objetos(self, frame):
-        self._asegurar_detector()
-        if not self.detector.listo.is_set():
-            self.voz.hablar("Preparando el detector de objetos.")
-            self.detector.listo.wait(300)
-        if self.detector.error:
-            self.anunciar("El detector de objetos no está disponible. Conéctate a internet una vez para descargarlo.")
-            return
-        detecciones = self.detector.detectar(frame)
-        anotada = frame.copy()
-        for c, puntaje, (x1, y1, x2, y2) in detecciones:
-            cv2.rectangle(anotada, (x1, y1), (x2, y2), (0, 170, 0), 3)
-            cv2.putText(anotada, f"{CLASES_ES[c][0]} {puntaje:.0%}", (x1, max(y1 - 8, 20)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 120, 0), 2)
-        cv2.imwrite(os.path.join(CARPETA_DEBUG, "objetos.png"), anotada)
-        print(f"DEBUG - objetos: {[(CLASES_ES[c][0], round(p, 2)) for c, p, _ in detecciones]}")
-        if detecciones:
-            self.anunciar(frase_conteo(detecciones), guardar_modo="objetos")
-            return
-        # Sin objetos conocidos (el modelo no sabe de lápices, fichas, etc.): contar piezas de color sueltas
-        h, w = frame.shape[:2]
-        pequeno = cv2.resize(frame, (800, int(h * 800 / w)))
-        piezas = [a for a in _candidatos_figuras(pequeno) if a["color"] not in ("blanco", "negro", "gris")]
-        if piezas:
-            n = len(piezas)
-            self.anunciar(f"No reconocí objetos por su nombre, pero veo {n} pieza{'s' if n != 1 else ''} de color.",
-                          guardar_modo="objetos")
-        else:
-            self.anunciar("No se detectaron objetos. Acerca la cámara, usa buena luz y un fondo liso.")
-
-    # ----------------------------- Materiales -----------------------------
-    def guardar_material(self, modo, texto):
-        nombre = nombre_material(modo, texto)
-        try:
-            with open(os.path.join(CARPETA_MATERIALES, nombre), "w", encoding="utf-8") as f:
-                f.write(texto)
-            self.ui(self.refrescar_materiales)
-        except OSError as e:
-            print(f"No se pudo guardar el material: {e}")
-
-    def refrescar_materiales(self):
-        self.lista.delete(0, "end")
-        consulta = ""
-        try:
-            consulta = self.var_busqueda.get().strip().lower()
-        except Exception:
-            pass
-        archivos = sorted((a for a in os.listdir(CARPETA_MATERIALES) if a.endswith(".txt")), reverse=True)
-        archivos.sort(key=lambda a: not a.startswith("★"))  # los favoritos arriba (el orden por fecha se conserva)
-        self._archivos = []
-        for a in archivos:
-            if consulta:
-                dentro = a.lower()
-                if consulta not in dentro:
-                    try:
-                        with open(os.path.join(CARPETA_MATERIALES, a), encoding="utf-8", errors="ignore") as f:
-                            dentro = f.read(6000).lower()
-                    except OSError:
-                        continue
-                    if consulta not in dentro:
-                        continue
-            self._archivos.append(a)
-            self.lista.insert("end", nombre_bonito(a))
-
-    def _material_elegido(self):
-        sel = self.lista.curselection()
-        if not sel or sel[0] >= len(getattr(self, "_archivos", [])):
-            self.voz.hablar("Selecciona un material de la lista.")
-            return None
-        return self._archivos[sel[0]]
-
-    def favorito_material(self):
-        a = self._material_elegido()
-        if not a:
-            return
-        nuevo = a.lstrip("★_") if a.startswith("★") else "★_" + a
-        try:
-            os.rename(os.path.join(CARPETA_MATERIALES, a), os.path.join(CARPETA_MATERIALES, nuevo))
-        except OSError as e:
-            print(f"Favorito: {e}")
-            return
-        self.refrescar_materiales()
-        self.voz.hablar("Quitado de favoritos." if a.startswith("★") else "Marcado como favorito.")
-
-    def borrar_material(self):
-        a = self._material_elegido()
-        if not a:
-            return
-        if messagebox.askyesno("Borrar material", f"¿Borrar «{nombre_bonito(a)}»?"):
-            try:
-                os.remove(os.path.join(CARPETA_MATERIALES, a))
-            except OSError as e:
-                print(f"Borrar: {e}")
-            self.refrescar_materiales()
-            self.voz.hablar("Material borrado.")
-
-    def escuchar_material(self):
-        a = self._material_elegido()
-        if not a:
-            return
-        with open(os.path.join(CARPETA_MATERIALES, a), encoding="utf-8") as f:
-            texto = f.read()
-        self.ultimo_texto = texto
-        self.anunciar(texto)
-
-    def importar_imagen(self):
-        ruta = filedialog.askopenfilename(title="Importar imagen",
-                                          filetypes=[("Imágenes", "*.png *.jpg *.jpeg *.bmp")])
-        if not ruta:
-            return
-        frame = cv2.imdecode(np.fromfile(ruta, np.uint8), cv2.IMREAD_COLOR)  # soporta rutas con tildes
-        if frame is None:
-            messagebox.showerror("Imagen", "No se pudo abrir la imagen.")
-            return
-        modo = self.modo_actual if self.pantalla == "modo" else "texto"
-        self.lanzar_analisis(frame, modo)
-
-    def importar_documento(self):
-        ruta = filedialog.askopenfilename(
-            title="Importar documento",
-            filetypes=[("Documentos e imágenes", "*.pdf *.docx *.txt *.md *.csv *.png *.jpg *.jpeg *.bmp"),
-                       ("Documentos", "*.pdf *.docx *.txt *.md *.csv"), ("Todos", "*.*")])
-        if ruta:
-            self.abrir_archivo(ruta)
-
-    def abrir_archivo(self, ruta):
-        ext = os.path.splitext(ruta)[1].lower()
-        if ext in EXT_IMG:
-            frame = cv2.imdecode(np.fromfile(ruta, np.uint8), cv2.IMREAD_COLOR)
-            if frame is None:
-                self.voz.hablar("No se pudo abrir la imagen.")
-                return
-            self.lanzar_analisis(frame, self.modo_actual if self.pantalla == "modo" else "texto")
-            return
-        if ext not in EXT_DOC:
-            self.voz.hablar("Ese tipo de archivo no es compatible. Usa PDF, Word, texto o imagen.")
-            return
-        if self.procesando:
-            return
-        self.procesando = True
-        self.voz.hablar("Abriendo el documento.")
-        self.lbl_resultado.config(text="Abriendo el documento...")
-        self._gen_analisis = self._gen
-        threading.Thread(target=self._leer_doc_hilo, args=(ruta,), daemon=True).start()
-
-    def _leer_doc_hilo(self, ruta):
-        try:
-            def ocr_pag(bgr):
-                if not self.ocr.listo.wait(60):
-                    return ""
-                return self._leer(bgr, (6, 3))
-
-            def prog(i, n):
-                self.ui(lambda: self.lbl_resultado.config(text=f"Leyendo página {i} de {n}..."))
-
-            texto = leer_documento(ruta, ocr_pag, prog)
-            if not texto:
-                self.anunciar("No encontré texto en este documento.")
-                return
-            if self._gen_analisis is not None and self._gen_analisis != self._gen:
-                return
-            self.ultimo_audio = texto
-            self.ui(lambda: self.lbl_resultado.config(text=texto[:600] + ("..." if len(texto) > 600 else "")))
-            self.ultimo_texto = texto
-            self.lectura.iniciar(texto)
-            self.guardar_material("documento", texto)
-        except Exception as e:
-            print(f"Error al leer documento: {e}")
-            self.anunciar(f"No pude abrir el documento. {e}" if isinstance(e, ValueError) else "No pude abrir el documento. Puede estar dañado.")
-        finally:
-            self._gen_analisis = None
-            self.ui(self._terminar)
-
-    def vigilar_entrada(self):
-        """Conexión con dispositivos: todo archivo que se copie a la carpeta Entrada se recibe y se guarda en Materiales."""
-        try:
-            for a in os.listdir(CARPETA_ENTRADA):
-                ruta = os.path.join(CARPETA_ENTRADA, a)
-                if not os.path.isfile(ruta) or a in self._entrada_vista or not a.lower().endswith(EXT_DOC + EXT_IMG):
-                    continue
-                if time.time() - os.path.getmtime(ruta) < 2:  # aún se está copiando
-                    continue
-                self._entrada_vista.add(a)
-                self.voz.hablar(f"Llegó un archivo: {os.path.splitext(a)[0]}. Se abrirá ahora." if self.pantalla != "modo" or not self.procesando else f"Llegó un archivo: {a}.")
-                if not self.procesando:
-                    self.abrir_archivo(ruta)
-        except OSError:
-            pass
-        self.root.after(3000, self.vigilar_entrada)
-
-
-    # ------------------------- Ayuda, color, significado -------------------------
-    TUTORIAL = ("Bienvenido a EduAccesible. Esta aplicación lee en voz alta lo que le muestras a la cámara. "
-                "Hay siete opciones: uno, leer texto. Dos, letras y palabras. Tres, números. Cuatro, figuras geométricas. "
-                "Cinco, contar objetos. Seis, materiales guardados. Siete, ajustes. "
-                "Para elegir una, di su nombre, pulsa su número, o haz la seña con la mano: un dedo, dos dedos, tres dedos, cuatro dedos, mano abierta. "
-                "Después apunta la cámara y di capturar, o pulsa la letra C. "
-                "Puedes decir repetir, silencio, pausa, continuar, siguiente, anterior, más lento o más rápido. "
-                "Para volver di inicio o atrás. Para oír todas las señas di señas. Para oír esta ayuda otra vez di tutorial.")
-
-    def tutorial(self):
-        self.ultimo_audio = self.TUTORIAL
-        self.lbl_resultado.config(text=self.TUTORIAL)
-        self.lectura.iniciar(self.TUTORIAL)
-
-    def alternar_encuadre(self):
-        self.ayuda_encuadre = not self.ayuda_encuadre
-        guardar_config(encuadre=self.ayuda_encuadre)
-        if getattr(self, "btn_encuadre", None) is not None:
-            self.btn_encuadre.config(text="🎯  Ayuda de encuadre: " + ("activada" if self.ayuda_encuadre else "apagada"))
-        self._msg_encuadre = ""
-        self.voz.hablar("Ayuda de encuadre activada. Te diré si hay poca luz o si la imagen está borrosa." if self.ayuda_encuadre
-                        else "Ayuda de encuadre apagada.")
-
-    def _revisar_encuadre(self, frame):
-        msg, ok = calidad_imagen(frame)
-        if not ok:
-            aviso = msg
-        else:
-            aviso = "Se ve bien. Puedes capturar."
-        ahora = time.time()
-        if aviso != self._msg_encuadre or ahora - self._t_msg_encuadre > 20:
-            if aviso == "Se ve bien. Puedes capturar." and self._msg_encuadre == "":
-                self._msg_encuadre = aviso
-                return  # no avisar que "se ve bien" si nunca hubo un problema
-            self._msg_encuadre, self._t_msg_encuadre = aviso, ahora
-            self.estado("🎯 " + aviso)
-            if not self.voz.ocupada():
-                self.voz.hablar(aviso)
-
     def decir_color(self):
-        if self.pantalla != "modo":
-            self.abrir_modo("texto")
-            self.root.after(1800, self.decir_color)
+        if self.pantalla != "modo" or self.ultimo_frame is None:
+            self.abrir_modo("colores")
             return
-        if self.ultimo_frame is None:
-            self.voz.hablar("La cámara no está disponible.")
-            return
-        c = color_del_centro(self.ultimo_frame)
-        self.anunciar(f"El color del centro es {c}.")
+        self.anunciar(describir_color_centro(self.ultimo_frame)[1])
 
     def _consulta_en_hilo(self, trabajo):
         def correr():
@@ -3726,8 +4260,8 @@ class EduAccesibleApp:
         self.voz.hablar(f"Buscando el significado de {palabra}.")
 
         def trabajo():
-            r = buscar_significado(palabra)
-            self.anunciar(f"{palabra}: {r}" if r else f"No encontré el significado de {palabra}. Prueba con otra palabra o revisa internet.")
+            r, _ = definir_palabra(palabra)
+            self.anunciar(r if r else f"No encontré el significado de {palabra}. Prueba con otra palabra o revisa internet.")
         self._consulta_en_hilo(trabajo)
 
     def traducir_ultimo(self, de, a):
@@ -3741,90 +4275,67 @@ class EduAccesibleApp:
             r = traducir_texto(texto, de, a)
             if not r:
                 self.anunciar("No pude traducir. Revisa la conexión a internet.")
-            elif a == "en":
-                self.ultimo_audio = r
-                self.ui(lambda: self.lbl_resultado.config(text=r))
-                self.lectura.detener()
-                self.voz.hablar("En inglés:")
-                self.voz.hablar_idioma(r, 0x09)
             else:
-                self.anunciar(r)
+                self.anunciar(r, idioma=a, intro=f"Del {IDIOMAS.get(de, de)} al {IDIOMAS.get(a, a)}.")
         self._consulta_en_hilo(trabajo)
 
-    # ----------------------------- Perfiles -----------------------------
-    def cambiar_perfil(self, nuevo=None):
-        cfg = leer_config()
-        perfiles = list(cfg.get("perfiles") or ["General"])
-        actual = cfg.get("perfil", "General")
-        if nuevo:
-            nuevo = " ".join(re.sub(r'[<>:"/\\|?*]', " ", nuevo).split())[:30]
-            if not nuevo:
-                return
-            if nuevo not in perfiles:
-                perfiles.append(nuevo)
-        else:
-            nuevo = perfiles[(perfiles.index(actual) + 1) % len(perfiles)] if actual in perfiles else perfiles[0]
-        guardar_config(perfiles=perfiles, perfil=nuevo)
-        _aplicar_perfil()
-        self.refrescar_materiales()
-        if getattr(self, "btn_perfil", None) is not None:
-            self.btn_perfil.config(text=f"👤  Perfil: {nuevo}")
-        self.voz.hablar(f"Perfil {nuevo}.")
+    def traducir_auto(self):
+        """«Traducir»: si hay un texto leído lo traduce (español al idioma elegido, o al español); si no, abre la función."""
+        if not self.ultimo_texto:
+            self.abrir_modo("traducir")
+            return
+        de = detectar_idioma(self.ultimo_texto)
+        a = cfg_p("idioma", "en") if de == "es" else "es"
+        self.traducir_ultimo(de, a if a != de else "es")
 
-    def nuevo_perfil(self):
-        n = simpledialog.askstring("Perfil nuevo", "Nombre del estudiante o perfil:", parent=self.root)
-        if n:
-            self.cambiar_perfil(nuevo=n)
+    def traducir_a_espanol(self):
+        de = detectar_idioma(self.ultimo_texto) if self.ultimo_texto else "en"
+        self.traducir_ultimo("en" if de == "es" else de, "es")
 
-    # ------------------------ Letra grande y contraste ------------------------
-    def alternar_letra(self):
-        grande = not leer_config().get("letra_grande", False)
-        guardar_config(letra_grande=grande)
-        self._aplicar_letra(grande)
-        if getattr(self, "btn_letra", None) is not None:
-            self.btn_letra.config(text="🔠  Letra grande: " + ("sí" if grande else "no"))
-        self.voz.hablar("Letra grande activada." if grande else "Letra normal.")
+    # ---- cámara: se reinicia sola si deja de dar imagen
+    @staticmethod
+    def _esperar_imagen(cap, maximo=3.0):
+        """True cuando la cámara ya entrega imagen no negra (muchas tardan ~1 s en ajustar la luz y al inicio salen negras)."""
+        fin = time.time() + maximo
+        while time.time() < fin:
+            ok, frame = cap.read()
+            if ok and frame is not None and frame.size and float(frame.mean()) > 6:
+                return True
+            time.sleep(0.04)
+        return False
 
-    def _compactar_barra(self, grande):
-        """Con letra grande los 4 botones laterales ocuparían más que la ventana: se hacen más bajos."""
-        for b in getattr(self, "_botones_barra", []):
-            b.pack_configure(pady=3 if grande else 7, ipady=3 if grande else 14)
+    def _vigilar_camara(self, lector, n):
+        """Si la cámara USB lleva varios segundos sin entregar cuadros mientras se necesita, se vuelve a abrir sola."""
+        ahora = time.time()
+        if not (self.pantalla == "modo" or self.gestos_activos):
+            self._t_cuadro = ahora  # en el menú no se leen cuadros: no es una falla
+            return
+        if n != getattr(self, "_n_vigilado", -1) or self.cambiando_camara:
+            self._n_vigilado, self._t_cuadro = n, ahora
+            return
+        if isinstance(self.indice_camara, int) and ahora - getattr(self, "_t_cuadro", ahora) > 6 \
+                and ahora - getattr(self, "_t_reabierta", 0) > 20:
+            self._t_reabierta = self._t_cuadro = ahora
+            self.cambiando_camara = True
+            print("Cámara sin imágenes desde hace 6 s: se vuelve a abrir.")
+            self.voz.hablar("La cámara dejó de responder. La estoy reiniciando.")
+            threading.Thread(target=self._reabrir_camara, daemon=True).start()
 
-    def _aplicar_letra(self, grande):
-        self._compactar_barra(grande)
+    def _reabrir_camara(self):
         try:
-            if not hasattr(self, "_escala_base"):
-                self._escala_base = float(self.root.tk.call("tk", "scaling"))
-            self.root.tk.call("tk", "scaling", self._escala_base * (1.2 if grande else 1.0))
-        except Exception as e:
-            print(f"Letra grande: {e}")
+            viejo, self.cap = self.cap, None
+            time.sleep(0.3)
+            if viejo is not None:
+                viejo.release()
+            cap = self._abrir_indice(self.indice_camara) or self.abrir_camara_auto()
+            self.frames_recientes.clear()
+            self.cap = cap
+            if cap is None:
+                self.anunciar("No pude reabrir la cámara. Revisa que no la use otro programa, o usa Cambiar cámara.")
+        finally:
+            self.cambiando_camara = False
 
-    def alternar_contraste(self):
-        alto = not leer_config().get("contraste", False)
-        guardar_config(contraste=alto)
-        if getattr(self, "btn_contraste", None) is not None:
-            self.btn_contraste.config(text="◐  Alto contraste: " + ("activado (reinicia)" if alto else "apagado (reinicia)"))
-        self.voz.hablar("Alto contraste activado. Cierra y abre la aplicación para verlo." if alto
-                        else "Alto contraste apagado. Cierra y abre la aplicación para verlo.")
-
-    # ------------------------- Pruebas al arrancar -------------------------
-    def autoprueba(self):
-        problemas = []
-        if self.cap is None:
-            problemas.append("no encuentro la cámara")
-        if not getattr(self.voz, "hay_espanol", True):
-            problemas.append("falta la voz en español de Windows")
-        if not self.mic.disponible():
-            problemas.append("no hay micrófono o reconocimiento de voz")
-        if not Gestos.disponible():
-            problemas.append("los gestos no están disponibles")
-        if problemas:
-            self.voz.hablar("Atención: " + ", ".join(problemas) + ". Abre Ajustes, Diagnóstico, para más detalles.")
-
-    # ---------------------------- Actualizaciones ----------------------------
-    nueva_version = None
-    btn_actualizar = None
-
+    # ---- actualización desde GitHub (Releases)
     def buscar_version(self, manual=False):
         """Mira en GitHub (Releases) si hay una versión más nueva que VERSION_APP."""
         tag, url = ultima_version()
@@ -3882,146 +4393,11 @@ class EduAccesibleApp:
         subprocess.Popen([destino, "/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"], close_fds=True)
         self.root.after(2500, self.cerrar)
 
-    def alternar_lento(self):
-        self.modo_lento = not self.modo_lento
-        guardar_config(lento=self.modo_lento)
-        if getattr(self, "btn_lento", None) is not None:
-            self.btn_lento.config(text="🐢  Modo equipo lento: " + ("activado" if self.modo_lento else "apagado"))
-        if self.modo_lento:
-            self.voz.hablar("Modo equipo lento activado. Cierra y abre la aplicación para que la cámara use menos resolución.")
-        else:
-            self.voz.hablar("Modo equipo lento apagado. Cierra y abre la aplicación para volver a la resolución normal.")
-
-    def texto_diagnostico(self):
-        def g(f, defecto="?"):
-            try:
-                return f()
-            except Exception:
-                return defecto
-        cap = getattr(self, "_cap", None)
-        res = g(lambda: f"{int(cap.get(3))}x{int(cap.get(4))}") if cap is not None else "sin cámara"
-        lector = getattr(self, "lector", None)
-        lineas = [
-            f"EduAccesible {VERSION_APP} - diagnóstico",
-            f"Windows: {g(lambda: sys.getwindowsversion().build, '?')} | Python {sys.version.split()[0]} | OpenCV {cv2.__version__} | núcleos {os.cpu_count()}",
-            f"Modo equipo lento: {'sí' if self.modo_lento else 'no'} | perfil: {leer_config().get('perfil', 'General')} | velocidad de voz {leer_config().get('velocidad', -1)} | volumen {leer_config().get('volumen', 100)}",
-            f"Cámara: {getattr(self, 'indice_camara', '?')} | resolución real {res} | cuadros/s {g(lambda: f'{lector.fps:.0f}') if lector else 'sin lector'}",
-            f"Gestos: {'activos' if self.gestos_activos else 'apagados'} | análisis/s {g(lambda: f'{self._fps_gestos:.0f}')} | MediaPipe {'disponible' if MP_MANOS is not None else 'NO disponible: ' + MP_ERROR}",
-            f"Estado de gestos: {g(lambda: self._texto_gestos)}",
-            f"Voz que habla: {getattr(self.voz, 'descripcion', '?')} | español instalado: {'sí' if getattr(self.voz, 'hay_espanol', True) else 'NO'}",
-            f"Voz continua: {'activa' if self.voz_continua else 'apagada'} | modelo de voz cargado: {'sí' if getattr(self.mic, 'modelo', None) is not None else 'no'}",
-            f"Lector de texto listo: {'sí' if g(lambda: self.ocr.listo.is_set(), False) else 'todavía no'}",
-            f"Wi-Fi: {'activo ' + self.wifi.url if self.wifi and self.wifi.activo() else 'apagado'}",
-            f"Carpeta: {BASE_DIR}",
-            "",
-            "--- Registro (últimas líneas) ---",
-            cola_registro(150),
-        ]
-        return "\n".join(lineas)
-
-    def abrir_diagnostico(self):
-        print("--- Diagnóstico abierto ---")
-        texto = self.texto_diagnostico()
-        v = tk.Toplevel(self.root)
-        v.title("Diagnóstico de EduAccesible")
-        v.geometry("820x560")
-        v.configure(bg=CREMA)
-        marco = tk.Frame(v, bg=CREMA)
-        marco.pack(fill="both", expand=True, padx=10, pady=10)
-        barra = tk.Scrollbar(marco)
-        barra.pack(side="right", fill="y")
-        caja = tk.Text(marco, wrap="word", font=("Consolas", 10), yscrollcommand=barra.set, bg="white", fg=TEXTO)
-        caja.pack(side="left", fill="both", expand=True)
-        barra.config(command=caja.yview)
-        caja.insert("1.0", texto)
-        caja.see("end")
-
-        def copiar():
-            self.root.clipboard_clear()
-            self.root.clipboard_append(texto)
-            self.voz.hablar("Diagnóstico copiado. Pégalo en un mensaje para enviarlo.")
-
-        def abrir_carpeta():
-            try:
-                os.startfile(CARPETA_DEBUG)
-            except Exception:
-                messagebox.showinfo("Diagnóstico", f"Carpeta: {CARPETA_DEBUG}")
-        fila = tk.Frame(v, bg=CREMA)
-        fila.pack(pady=(0, 10))
-        self.boton(fila, "📋 Copiar todo", VERDE, copiar, fuente=12).pack(side="left", padx=6, ipady=4, ipadx=10)
-        self.boton(fila, "📂 Abrir carpeta del registro", NARANJA, abrir_carpeta, fuente=12).pack(side="left", padx=6, ipady=4, ipadx=10)
-        self.boton(fila, "Cerrar", AMARILLO, v.destroy, fg=TEXTO, fuente=12).pack(side="left", padx=6, ipady=4, ipadx=10)
-
-    def alternar_wifi(self):
-        if self.wifi.activo():
-            self.wifi.detener()
-            self.voz.hablar("Recepción por Wi-Fi apagada.")
-            self.lbl_resultado.config(text="Recepción por Wi-Fi apagada.")
-            return
-        try:
-            self.wifi.iniciar()
-        except OSError as e:
-            self.voz.hablar("No se pudo activar el Wi-Fi. Puede que el puerto esté ocupado.")
-            print(e)
-            return
-        c = " ".join(self.wifi.codigo)
-        t = f"Para enviar archivos, abre en el celular la dirección {self.wifi.url} y escribe el código {self.wifi.codigo}."
-        self.lbl_resultado.config(text=t)
-        self.mostrar_qr()
-        self.voz.hablar(f"Recepción por Wi-Fi activa. En el celular, conectado a la misma red, abre el navegador y escribe {self.wifi.url.replace('http://', '').replace('.', ' punto ').replace(':', ' dos puntos ')}. El código es {c}. Si Windows pregunta por el firewall, elige Permitir.")
-
-    def mostrar_qr(self):
-        """Ventana con un código QR: el celular lo escanea y abre la página con el código ya escrito."""
-        v = tk.Toplevel(self.root)
-        v.title("Recibir por Wi-Fi")
-        v.configure(bg=CREMA)
-        tk.Label(v, text="Escanea con la cámara del celular", font=("Segoe UI", 15, "bold"), fg=VERDE, bg=CREMA).pack(padx=20, pady=(14, 6))
-        try:
-            import segno
-            matriz = [list(f) for f in segno.make(self.wifi.url_qr, error="m").matrix]
-            n, c, borde = len(matriz), 7, 4
-            lienzo = tk.Canvas(v, width=(n + 2 * borde) * c, height=(n + 2 * borde) * c, bg="white", highlightthickness=0)
-            lienzo.pack(padx=20, pady=6)
-            for y, fila in enumerate(matriz):
-                for x, oscuro in enumerate(fila):
-                    if oscuro:
-                        lienzo.create_rectangle((x + borde) * c, (y + borde) * c, (x + borde + 1) * c, (y + borde + 1) * c, fill="black", width=0)
-        except Exception as e:
-            print(f"QR no disponible: {e}")
-        tk.Label(v, text=f"O escribe en el navegador:\n{self.wifi.url}\nCódigo: {self.wifi.codigo}\n\nEl celular debe estar en la misma red Wi-Fi.\nSi Windows pregunta por el firewall, elige Permitir.",
-                 font=("Segoe UI", 12), fg=TEXTO, bg=CREMA, justify="center").pack(padx=20, pady=6)
-        self.boton(v, "Cerrar", AMARILLO, v.destroy, fg=TEXTO, fuente=12).pack(pady=(4, 14), ipadx=20, ipady=4)
-
-    def abrir_entrada(self):
-        try:
-            os.startfile(CARPETA_ENTRADA)
-        except Exception:
-            messagebox.showinfo("Entrada", f"Carpeta: {CARPETA_ENTRADA}")
-
-    def compartir_texto(self):
-        t = getattr(self, "ultimo_audio", "") or ""
-        if not t:
-            self.voz.hablar("Todavía no hay nada para compartir.")
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(t)
-        ruta = filedialog.asksaveasfilename(title="Guardar texto leído", defaultextension=".txt", filetypes=[("Texto", "*.txt")])
-        if ruta:
-            with open(ruta, "w", encoding="utf-8") as f:
-                f.write(t)
-            self.voz.hablar("Texto guardado.")
-        else:
-            self.voz.hablar("Texto copiado. Puedes pegarlo en otro programa.")
-
-    def abrir_carpeta(self):
-        try:
-            os.startfile(CARPETA_MATERIALES)
-        except Exception:
-            messagebox.showinfo("Materiales", f"Carpeta: {CARPETA_MATERIALES}")
-
     # ------------------------------ Cierre --------------------------------
     def cerrar(self):
         self.voz_continua = False  # termina el bucle del micrófono
+        self.detener_lectura()
+        self._cerrar_qr_wifi()
         lector, self.lector = self.lector, None
         cap, self._cap = self._cap, None
         parado = lector.parar(1.0) if lector is not None else True  # sin congelar el cierre si el teléfono no responde
@@ -4148,6 +4524,18 @@ def trozos_voz(texto, tam=900):
 # ---------------------------------------------------------------------------
 # Recibir archivos por Wi-Fi (el celular abre una página y sube el archivo)
 # ---------------------------------------------------------------------------
+PAGINA_WIFI = """<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EduAccesible</title><style>body{font-family:Arial;background:#FAF6EB;color:#2B2650;text-align:center;padding:24px}
+h1{color:#895DCA}button,label{display:block;margin:18px auto;padding:20px;font-size:22px;border-radius:14px;background:#895DCA;color:#fff;border:0;max-width:420px}
+#m{font-size:20px;margin-top:20px}</style></head><body><h1>EduAccesible</h1><p>Elige un PDF, Word, texto o imagen para enviarlo al dispositivo.</p>
+<label>Elegir archivo<input id="f" type="file" style="display:none" accept=".pdf,.docx,.txt,.md,.csv,.png,.jpg,.jpeg,.bmp"></label>
+<div id="m"></div><script>
+const k=new URLSearchParams(location.search).get('k')||'';
+document.getElementById('f').onchange=async e=>{const f=e.target.files[0];if(!f)return;const m=document.getElementById('m');m.textContent='Enviando...';
+try{const r=await fetch('/subir?k='+encodeURIComponent(k)+'&nombre='+encodeURIComponent(f.name),{method:'POST',body:f});m.textContent=r.ok?'Enviado: '+f.name:'No se pudo enviar ('+(await r.text())+')';}catch(x){m.textContent='Error de conexión'}};
+</script></body></html>"""
+
+
 def ip_local():
     import socket
     try:
@@ -4170,9 +4558,9 @@ PAGINA_WIFI = """<!doctype html><html lang="es"><head><meta charset="utf-8"><met
 <title>EduAccesible</title><style>body{font-family:Arial;background:#FAF6EB;color:#2B2650;text-align:center;padding:24px}
 button,input{font-size:20px;padding:14px;margin:8px;border-radius:12px;border:2px solid #895DCA}button{background:#895DCA;color:#fff}
 #m{font-size:20px;margin-top:18px}</style></head><body><h1>Enviar a EduAccesible</h1>
-<p>Código que aparece en la pantalla:</p><input id="c" inputmode="numeric" maxlength="4" size="4"><br>
+<p>Código que aparece en la pantalla:</p><input id="c" inputmode="numeric" maxlength="4" size="4" value=""><br>
 <input id="f" type="file" accept=".pdf,.docx,.txt,.md,.csv,.png,.jpg,.jpeg,.bmp"><br><button onclick="e()">Enviar</button><div id="m"></div>
-<script>document.getElementById('c').value=new URLSearchParams(location.search).get('c')||'';async function e(){const f=document.getElementById('f').files[0],m=document.getElementById('m');
+<script>document.getElementById('c').value=new URLSearchParams(location.search).get('k')||'';async function e(){const f=document.getElementById('f').files[0],m=document.getElementById('m');
 if(!f){m.textContent='Elige un archivo';return}m.textContent='Enviando...';
 try{const r=await fetch('/subir',{method:'POST',headers:{'X-Nombre':encodeURIComponent(f.name),'X-Codigo':document.getElementById('c').value},body:f});
 m.textContent=r.ok?'Enviado. Ya se está leyendo en EduAccesible.':(r.status==403?'Código incorrecto':'No se pudo enviar')}catch(x){m.textContent='Sin conexión'}}</script></body></html>"""
@@ -4252,7 +4640,6 @@ class ServidorWifi:
         self.httpd = http.server.ThreadingHTTPServer(("0.0.0.0", puerto), H)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         self.url = f"http://{self.ip_local()}:{puerto}"
-        self.url_qr = f"{self.url}/?c={self.codigo}"
 
     def detener(self):
         if self.httpd:
@@ -4261,10 +4648,832 @@ class ServidorWifi:
             self.httpd = None
 
 
+TEXTO_BIENVENIDA = (
+    "Bienvenido a EduAccesible. Esta aplicación lee en voz alta lo que le muestras a la cámara.\n"
+    "Las funciones son: uno, leer texto. Dos, reconocer letras y palabras. Tres, números. Cuatro, figuras geométricas. "
+    "Cinco, contar objetos. Seis, materiales guardados. Siete, ajustes. Ocho, más herramientas: colores, billetes, "
+    "operaciones, diccionario y traductor.\n"
+    "Para usarla, elige una función, apunta la cámara a la hoja y presiona el botón Capturar, o la tecla C. "
+    "Si quieres oírlo otra vez, presiona Repetir o la tecla R.\n"
+    "Mientras te leo puedes pausar con la tecla P, saltar al párrafo siguiente con la flecha derecha y volver con la izquierda. "
+    "Con más y menos cambias la velocidad de la voz, y con las flechas arriba y abajo el volumen.\n"
+    "También puedes hablar: di capturar, atrás, inicio, repetir o silencio. Y si activas los gestos, puedes elegir "
+    "funciones con los dedos: un dedo es leer texto, dos dedos son letras, y así. Di señas para oír todas.\n"
+    "En Ajustes están el alto contraste, la letra grande y los perfiles de estudiante.\n"
+    "Para empezar, presiona Enter o di inicio."
+)
+
 
 # ---------------------------------------------------------------------------
-# Utilidades: color, calidad de foto, cuentas, materiales, consultas en internet
+# v8: utilidades (lógica pura, sin pantalla: se pueden probar por separado)
 # ---------------------------------------------------------------------------
+PALETA_NORMAL = {"CREMA": "#faf6eb", "VERDE": "#895dca", "NARANJA": "#5273ba", "AMARILLO": "#cdb8ea", "TEXTO": "#2b2650",
+                 "CAJA_BG": "#ffffff", "CAJA_FG": "#2b2650", "RES_PARRAFO": "#fff0a8", "RES_PARRAFO_FG": "#2b2650",
+                 "RES_PALABRA": "#ffb347", "RES_PALABRA_FG": "#000000"}
+PALETA_CONTRASTE = {"CREMA": "#000000", "VERDE": "#ffd60a", "NARANJA": "#4dd0ff", "AMARILLO": "#ffffff", "TEXTO": "#ffffff",
+                    "CAJA_BG": "#000000", "CAJA_FG": "#ffffff", "RES_PARRAFO": "#3a3a00", "RES_PARRAFO_FG": "#ffffff",
+                    "RES_PALABRA": "#ffd60a", "RES_PALABRA_FG": "#000000"}
+ESCALA_FUENTE = 1.0
+ALTO_CONTRASTE = False
+
+
+def configurar_tema(contraste=False, letra_grande=False):
+    """Alto contraste (fondo negro, amarillo y celeste) y letra grande para toda la interfaz."""
+    global ESCALA_FUENTE, ALTO_CONTRASTE
+    globals().update(PALETA_CONTRASTE if contraste else PALETA_NORMAL)
+    ALTO_CONTRASTE = bool(contraste)
+    ESCALA_FUENTE = 1.35 if letra_grande else 1.0
+
+
+def F(tam, *estilo):
+    """Fuente de la interfaz, ya escalada si está la letra grande."""
+    return ("Segoe UI", max(8, int(round(tam * ESCALA_FUENTE)))) + tuple(estilo)
+
+
+# ---- perfiles de estudiante: cada uno con sus ajustes y su carpeta de materiales
+def perfil_actual():
+    return leer_config().get("perfil_actual") or "General"
+
+
+def lista_perfiles():
+    otros = sorted(n for n in leer_config().get("perfiles", {}) if n != "General")
+    return ["General"] + otros
+
+
+def cfg_p(clave, defecto=None):
+    return leer_config().get("perfiles", {}).get(perfil_actual(), {}).get(clave, defecto)
+
+
+def guardar_p(**datos):
+    perfiles = leer_config().get("perfiles", {})
+    perfiles.setdefault(perfil_actual(), {}).update(datos)
+    guardar_config(perfiles=perfiles)
+
+
+def carpeta_materiales_perfil(nombre):
+    if not nombre or nombre == "General":
+        return CARPETA_MATERIALES
+    seguro = re.sub(r"[^\w\- ]", "", nombre).strip() or "perfil"
+    ruta = os.path.join(CARPETA_MATERIALES, seguro)
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
+
+
+# ---- lectura por párrafos (pausar, continuar, adelantar, retroceder)
+def partir_parrafos(texto, tam=320):
+    """Lista de párrafos para leer de a uno. Une las líneas cortadas por el ancho de la página y parte los textos largos por frases."""
+    lineas = [" ".join(l.split()) for l in str(texto).replace("\r", "\n").split("\n")]
+    bloques = []
+    for l in lineas:
+        if not l:
+            continue
+        if bloques and not re.search(r"[.!?:;…]$", bloques[-1]) and re.match(r"[a-záéíóúüñ0-9(]", l) and len(bloques[-1]) < tam:
+            bloques[-1] += " " + l
+        else:
+            bloques.append(l)
+    out = []
+    for b in bloques:
+        if len(b) <= tam:
+            out.append(b)
+            continue
+        actual = ""
+        for fr in re.split(r"(?<=[.!?;:])\s+", b):
+            while len(fr) > tam:
+                corte = fr.rfind(" ", 0, tam)
+                corte = corte if corte > 0 else tam
+                if actual:
+                    out.append(actual)
+                    actual = ""
+                out.append(fr[:corte].strip())
+                fr = fr[corte:].strip()
+            if actual and len(actual) + 1 + len(fr) > tam:
+                out.append(actual)
+                actual = fr
+            else:
+                actual = (actual + " " + fr).strip()
+        if actual:
+            out.append(actual)
+    return out
+
+
+class ListaParrafos:
+    def __init__(self):
+        self.cargar("")
+
+    def cargar(self, texto, tam=320):
+        self.parrafos = partir_parrafos(texto, tam)
+        self.texto = "\n".join(self.parrafos)
+        self.inicios, pos = [], 0
+        for p in self.parrafos:
+            self.inicios.append(pos)
+            pos += len(p) + 1
+        self.indice = 0
+
+    def hay(self):
+        return bool(self.parrafos)
+
+    def terminado(self):
+        return self.indice >= len(self.parrafos)
+
+    def rango(self, i):
+        return self.inicios[i], self.inicios[i] + len(self.parrafos[i])
+
+
+class CajaResultado(tk.Text):
+    """Cuadro de solo lectura que se maneja como una etiqueta (.config(text=...)) y resalta lo que se está leyendo."""
+
+    def __init__(self, padre, **kw):
+        kw.setdefault("wrap", "word")
+        kw.setdefault("font", F(15))
+        kw.setdefault("bg", CREMA)
+        kw.setdefault("fg", TEXTO)
+        kw.setdefault("relief", "flat")
+        kw.setdefault("bd", 0)
+        kw.setdefault("highlightthickness", 0)
+        super().__init__(padre, **kw)
+        tk.Text.configure(self, state="disabled", cursor="arrow")
+        self.tag_configure("parrafo", background=RES_PARRAFO, foreground=RES_PARRAFO_FG)
+        self.tag_configure("palabra", background=RES_PALABRA, foreground=RES_PALABRA_FG)
+        self.tag_raise("palabra")
+
+    def configure(self, cnf=None, **kw):
+        if isinstance(cnf, dict):
+            kw = {**cnf, **kw}
+        if "text" in kw:
+            self.poner(kw.pop("text"))
+        return tk.Text.configure(self, **kw) if kw else None
+
+    config = configure
+
+    def poner(self, texto):
+        tk.Text.configure(self, state="normal")
+        self.delete("1.0", "end")
+        self.insert("1.0", texto)
+        tk.Text.configure(self, state="disabled")
+
+    def quitar_resaltado(self):
+        self.tag_remove("parrafo", "1.0", "end")
+        self.tag_remove("palabra", "1.0", "end")
+
+    def resaltar_parrafo(self, ini, fin):
+        self.quitar_resaltado()
+        self.tag_add("parrafo", f"1.0+{ini}c", f"1.0+{fin}c")
+        self.see(f"1.0+{ini}c")
+
+    def resaltar_palabra(self, ini, largo):
+        self.tag_remove("palabra", "1.0", "end")
+        self.tag_add("palabra", f"1.0+{ini}c", f"1.0+{ini + largo}c")
+        self.see(f"1.0+{ini}c")
+
+
+class _EventosVoz:
+    """Eventos de SAPI: avisa qué palabra se está diciendo (para resaltarla)."""
+    destino = None
+
+    def OnWord(self, StreamNumber, StreamPosition, CharacterPosition, Length):
+        f = _EventosVoz.destino
+        if f is not None:
+            try:
+                f(CharacterPosition, Length)
+            except Exception:
+                pass
+
+
+# ---- ayuda para encuadrar la hoja (brillo, nitidez, centrado)
+UMBRAL_OSCURO, UMBRAL_CLARO, UMBRAL_BORROSO = 55, 232, 60  # se pueden ajustar según la cámara
+
+
+def evaluar_encuadre(frame):
+    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    alto, ancho = g.shape
+    g = cv2.resize(g, (640, max(1, int(alto * 640 / ancho))), interpolation=cv2.INTER_AREA)
+    info = {"brillo": float(g.mean()), "contraste": float(g.std()),
+            "nitidez": float(cv2.Laplacian(g, cv2.CV_64F).var()), "fraccion": 0.0, "centrado": 0.0, "desv": 1.0}
+    chico = cv2.GaussianBlur(cv2.resize(g, (160, max(1, int(g.shape[0] / 4))), interpolation=cv2.INTER_AREA), (5, 5), 0)
+    _, bina = cv2.threshold(chico, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    cont, _ = cv2.findContours(bina, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if cont:
+        H, W = bina.shape
+        c = max(cont, key=cv2.contourArea)
+        fr = cv2.contourArea(c) / float(W * H)
+        x, y, cw, ch = cv2.boundingRect(c)
+        info["fraccion"] = fr
+        if fr >= 0.12:
+            desv = max(abs((x + cw / 2) / W - 0.5), abs((y + ch / 2) / H - 0.5)) * 2
+            tam = fr / 0.30 if fr < 0.30 else (1.0 if fr <= 0.85 else max(0.0, (1.0 - fr) / 0.15))
+            cen = max(0.0, 1.0 - desv) * tam
+            if min(x, y, W - (x + cw), H - (y + ch)) / float(min(W, H)) < 0.02:
+                cen *= 0.6
+            info["desv"], info["centrado"] = desv, cen
+    return info
+
+
+def mensaje_encuadre(info, hoja=True):
+    if info["brillo"] < UMBRAL_OSCURO:
+        return "Está muy oscuro. Busca más luz."
+    if info["brillo"] > UMBRAL_CLARO:
+        return "Hay demasiada luz o reflejo. Inclina un poco el papel."
+    if info["contraste"] > 12 and info["nitidez"] < UMBRAL_BORROSO:
+        return "La imagen está borrosa. Aleja un poco la cámara y mantenla quieta."
+    if hoja and 0.12 <= info["fraccion"] <= 0.9 and info["desv"] > 0.5:
+        return "Centra la hoja en la cámara."
+    return None
+
+
+def tono_encuadre(centrado):
+    return int(500 + 700 * min(1.0, max(0.0, centrado)))
+
+
+# ---- colores y billetes
+NOMBRES_COLOR_EXT = NOMBRES_COLOR + ["café"]
+BILLETES_COLOR = {"azul": "2.000", "café": "5.000", "rojo": "10.000", "naranja": "20.000", "morado": "50.000", "verde": "100.000"}
+
+
+def _clases_color(hsv):
+    clases = clases_de_color(hsv)
+    clases[(clases == 4) & (hsv[..., 2] < 150)] = 10  # naranja oscuro = café
+    return clases
+
+
+def describir_color_centro(frame):
+    h, w = frame.shape[:2]
+    roi = frame[int(h * .38):int(h * .62), int(w * .38):int(w * .62)]
+    roi = cv2.resize(roi if roi.size else frame, (48, 48), interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    cuenta = np.bincount(_clases_color(hsv).ravel(), minlength=11) / float(48 * 48)
+    orden = np.argsort(-cuenta)
+    principal, segundo = NOMBRES_COLOR_EXT[orden[0]], NOMBRES_COLOR_EXT[orden[1]]
+    v, s = float(np.median(hsv[..., 2])), float(np.median(hsv[..., 1]))
+    matiz = ""
+    if principal in ("negro", "blanco"):
+        pass
+    elif principal == "gris":
+        matiz = " claro" if v > 170 else (" oscuro" if v < 100 else "")
+    else:
+        matiz = " claro" if (v > 200 and s < 110) else (" oscuro" if v < 110 else "")
+    if cuenta[orden[0]] < 0.6 and cuenta[orden[1]] >= 0.25:
+        return principal, f"Veo {principal}{matiz} y también {segundo}."
+    return principal, f"El color es {principal}{matiz}."
+
+
+def reconocer_billetes(frame):
+    """[(valor, parte)] por el color predominante. Es aproximado: para exactitud hay que calibrar con fotos reales."""
+    h, w = frame.shape[:2]
+    hsv = cv2.cvtColor(cv2.resize(frame, (160, max(1, int(h * 160 / w))), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2HSV)
+    clases = _clases_color(hsv)
+    util = (hsv[..., 1] >= 50) & (hsv[..., 2] >= 60)
+    if util.sum() < 0.08 * clases.size:
+        return []
+    cuenta = np.bincount(clases[util].ravel(), minlength=11)
+    res = []
+    for nombre, valor in BILLETES_COLOR.items():
+        n = cuenta[NOMBRES_COLOR_EXT.index(nombre)]
+        if n / cuenta.sum() >= 0.30 and n >= 0.05 * clases.size:
+            res.append((valor, float(n / cuenta.sum())))
+    return sorted(res, key=lambda t: -t[1])
+
+
+def frase_billetes(res):
+    if not res:
+        return ("No reconocí un billete. Pon el billete completo sobre un fondo blanco y con buena luz. "
+                "Las monedas todavía no se reconocen.")
+    if len(res) == 1:
+        return f"Por su color parece un billete de {res[0][0]} pesos. Es una ayuda aproximada: confírmalo con tu billete."
+    return ("Veo colores de billetes de " + " y de ".join(v for v, _ in res[:3]) +
+            " pesos. Es aproximado: confírmalo con tus billetes.")
+
+
+# ---- operaciones escritas (se calculan sin ejecutar nada raro)
+_NUM = r"\d+(?:[.,]\d+)?"
+_RE_EXPR = re.compile(rf"{_NUM}(?:\s*[-+*/]\s*{_NUM})+(?:\s*=\s*(?:{_NUM})?)?")
+_PALABRA_OP = {"+": "más", "-": "menos", "*": "por", "/": "entre"}
+
+
+def _numero(s):
+    if re.fullmatch(r"\d{1,3}(\.\d{3})+", s):  # 1.000 = mil (como se escribe en Colombia)
+        s = s.replace(".", "")
+    s = s.replace(",", ".")
+    return float(s) if "." in s else int(s)
+
+
+def formato_numero(v):
+    if abs(v - round(v)) < 1e-9:
+        return str(int(round(v)))
+    return f"{v:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def evaluar_seguro(expr):
+    """Calcula solo + - * / con números. Cualquier otra cosa se rechaza."""
+    def ev(n):
+        if isinstance(n, ast.Expression):
+            return ev(n.body)
+        if isinstance(n, ast.Constant) and type(n.value) in (int, float):
+            return n.value
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.UAdd, ast.USub)):
+            v = ev(n.operand)
+            return -v if isinstance(n.op, ast.USub) else v
+        if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+            a, b = ev(n.left), ev(n.right)
+            if isinstance(n.op, ast.Add):
+                return a + b
+            if isinstance(n.op, ast.Sub):
+                return a - b
+            if isinstance(n.op, ast.Mult):
+                return a * b
+            return a / b
+        raise ValueError("no permitido")
+    if len(expr) > 80:
+        raise ValueError("muy larga")
+    return ev(ast.parse(expr, mode="eval"))
+
+
+def calcular_operaciones(texto, maximo=6):
+    t = str(texto).translate(str.maketrans({"×": "*", "x": "*", "X": "*", "·": "*", "÷": "/", "−": "-", "–": "-", "—": "-"}))
+    out = []
+    for m in _RE_EXPR.finditer(t):
+        s = m.group(0)
+        izq, _, der = s.partition("=")
+        if "=" not in s and re.search(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", izq):
+            continue  # parece una fecha
+        piezas = re.findall(rf"{_NUM}|[-+*/]", izq)
+        try:
+            res = evaluar_seguro("".join(str(_numero(p)) if re.match(r"\d", p) else p for p in piezas))
+        except ZeroDivisionError:
+            out.append({"expr": izq.strip(), "resultado": None, "frase": f"{izq.strip()}: no se puede dividir entre cero."})
+            continue
+        except Exception:
+            continue
+        hablada = " ".join(_PALABRA_OP[p] if p in _PALABRA_OP else formato_numero(_numero(p)) for p in piezas)
+        frase = f"{hablada} es igual a {formato_numero(res)}."
+        escrito = der.strip()
+        if "=" in s and escrito:
+            ok = abs(_numero(escrito) - res) < 1e-6
+            frase += " El resultado escrito es correcto." if ok else f" El resultado escrito, {escrito}, no coincide."
+        out.append({"expr": izq.strip(), "resultado": res, "frase": frase})
+        if len(out) >= maximo:
+            break
+    return out
+
+
+# ---- diccionario (internet y respaldo guardado) y traducción
+DICCIONARIO_BASICO = {
+    "agua": "Líquido transparente, sin color ni sabor, que bebemos y que cubre la mayor parte de la Tierra.",
+    "aire": "Mezcla de gases que rodea la Tierra y que necesitamos para respirar.",
+    "amigo": "Persona con la que se tiene confianza y cariño.",
+    "animal": "Ser vivo que se mueve, siente y necesita alimentarse, como el perro o el pájaro.",
+    "arbol": "Planta grande con tronco, ramas y hojas.",
+    "ayudar": "Hacer algo para que otra persona lo logre con menos esfuerzo.",
+    "azul": "Color del cielo despejado y del mar.",
+    "bailar": "Mover el cuerpo al ritmo de la música.",
+    "barco": "Vehículo que flota y se mueve por el agua.",
+    "bicicleta": "Vehículo de dos ruedas que se mueve con pedales.",
+    "bonito": "Que agrada a la vista o al oído.",
+    "caballo": "Animal grande de cuatro patas que se puede montar.",
+    "cabeza": "Parte superior del cuerpo, donde están los ojos, la nariz y la boca.",
+    "cama": "Mueble donde nos acostamos a dormir.",
+    "caminar": "Ir de un lugar a otro dando pasos.",
+    "cantar": "Producir con la voz sonidos musicales.",
+    "casa": "Edificio donde viven las personas.",
+    "cielo": "Espacio que vemos sobre nosotros, donde están las nubes, el Sol y las estrellas.",
+    "circulo": "Figura plana y redonda, cuyos puntos están a la misma distancia del centro.",
+    "ciudad": "Lugar grande con muchas casas, edificios y habitantes.",
+    "colegio": "Lugar donde los niños y jóvenes aprenden.",
+    "color": "Impresión que la luz produce en los ojos, como el rojo o el verde.",
+    "comer": "Tomar alimentos.",
+    "consonante": "Letra que se pronuncia con ayuda de una vocal.",
+    "correr": "Ir deprisa, moviendo las piernas más rápido que al caminar.",
+    "cuadrado": "Figura de cuatro lados iguales y cuatro ángulos rectos.",
+    "cuaderno": "Conjunto de hojas unidas donde se escribe o se dibuja.",
+    "dedo": "Cada una de las partes largas y separadas en que terminan las manos y los pies.",
+    "dia": "Tiempo en que hay luz del Sol; también, período de veinticuatro horas.",
+    "dividir": "Repartir una cantidad en partes iguales.",
+    "dormir": "Descansar con los ojos cerrados, sin darse cuenta de lo que pasa alrededor.",
+    "escribir": "Representar palabras con letras sobre un papel u otra superficie.",
+    "escuchar": "Prestar atención para oír.",
+    "escuela": "Lugar donde se enseña y se aprende.",
+    "estrella": "Cuerpo que brilla en el cielo de noche; el Sol es la estrella más cercana a la Tierra.",
+    "familia": "Grupo de personas unidas por parentesco, como padres, hijos y hermanos.",
+    "feliz": "Que siente alegría y contento.",
+    "flor": "Parte de la planta, de colores vistosos, de la que nacen los frutos.",
+    "fruta": "Fruto comestible de algunas plantas, como la manzana o la naranja.",
+    "gato": "Animal doméstico de cuatro patas, con bigotes, que maúlla.",
+    "grande": "De tamaño mayor que lo normal.",
+    "hablar": "Decir palabras para comunicarse.",
+    "hermano": "Persona que tiene los mismos padres que otra.",
+    "hoja": "Parte verde y plana de las plantas; también, pieza delgada de papel.",
+    "hombre": "Persona adulta de sexo masculino.",
+    "jugar": "Hacer algo para divertirse.",
+    "lapiz": "Instrumento para escribir o dibujar, con una mina de grafito.",
+    "leer": "Mirar un texto y entender lo que dice.",
+    "letra": "Signo con el que se escribe cada sonido de una lengua.",
+    "libro": "Conjunto de hojas impresas y unidas que forman un texto.",
+    "luna": "Astro que gira alrededor de la Tierra y brilla de noche.",
+    "maestro": "Persona que enseña.",
+    "mama": "Madre.",
+    "mano": "Parte del cuerpo al final del brazo, con la que tomamos las cosas.",
+    "manzana": "Fruta redonda, de cáscara roja, verde o amarilla.",
+    "mar": "Gran extensión de agua salada.",
+    "mesa": "Mueble con patas y una superficie plana.",
+    "montana": "Elevación muy grande del terreno.",
+    "mujer": "Persona adulta de sexo femenino.",
+    "multiplicar": "Repetir una cantidad tantas veces como indica otra.",
+    "musica": "Arte de combinar sonidos de manera agradable.",
+    "nino": "Persona que está en la niñez, es decir, que todavía es pequeña.",
+    "noche": "Tiempo en que no hay luz del Sol.",
+    "nube": "Masa de gotitas de agua que flota en el cielo.",
+    "numero": "Signo o palabra que indica una cantidad.",
+    "ojo": "Órgano con el que vemos.",
+    "padre": "Hombre que tiene hijos.",
+    "pajaro": "Animal con plumas y alas, que generalmente vuela.",
+    "palabra": "Sonido o conjunto de letras que expresa una idea.",
+    "papel": "Hoja delgada que sirve para escribir, dibujar o envolver.",
+    "pelota": "Objeto redondo que se usa para jugar.",
+    "perro": "Animal doméstico de cuatro patas que ladra.",
+    "pez": "Animal que vive en el agua y respira por branquias.",
+    "planta": "Ser vivo que tiene raíces, tallo y hojas, y que no se mueve de su lugar.",
+    "puerta": "Abertura por donde se entra y se sale, o la pieza que la cierra.",
+    "rectangulo": "Figura de cuatro lados, con lados opuestos iguales y cuatro ángulos rectos.",
+    "respetar": "Tratar a los demás con consideración.",
+    "restar": "Quitar una cantidad de otra.",
+    "rio": "Corriente de agua que va a dar al mar o a otro río.",
+    "rojo": "Color como el de la sangre o el tomate.",
+    "saltar": "Levantarse del suelo con impulso.",
+    "silla": "Asiento con respaldo y patas, para una persona.",
+    "sol": "Estrella que da luz y calor a la Tierra.",
+    "sumar": "Juntar cantidades para saber cuánto hay en total.",
+    "tiempo": "Duración de las cosas; también, estado de la atmósfera, como lluvia o sol.",
+    "tierra": "Planeta en que vivimos; también, el suelo donde crecen las plantas.",
+    "triangulo": "Figura de tres lados y tres ángulos.",
+    "triste": "Que siente pena o tristeza.",
+    "vaca": "Animal que da leche y se cría en el campo.",
+    "ventana": "Abertura en la pared para que entren la luz y el aire.",
+    "verbo": "Palabra que indica acción, estado o existencia.",
+    "verde": "Color como el de las hojas de las plantas.",
+    "vocal": "Letra que se pronuncia sin que el aire choque en la boca: a, e, i, o, u.",
+}
+RUTA_CACHE_DICC = os.path.join(CARPETA_MODELOS, "diccionario_cache.json")
+IDIOMAS = {"en": "inglés", "fr": "francés", "pt": "portugués", "it": "italiano", "de": "alemán", "es": "español"}
+_STOP = {"es": "que el los las del una para con por como pero muy más está son qué también hay esto cuando",
+         "en": "the and is you that it was for with are this have from they what not but your will would there",
+         "fr": "le les des une est dans pour pas sur avec ce il elle je nous vous sont qui mais",
+         "pt": "não uma você com para os as mais foi ele ela são também isso muito",
+         "it": "il gli che non sono per come della degli questo anche molto",
+         "de": "der die das und ist nicht ein mit von ich sie wir auch aber"}
+
+
+def palabra_para_definir(texto):
+    palabras = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}", str(texto))
+    return palabras[0].lower() if palabras else None
+
+
+def _http_json(url, timeout=7):
+    req = urllib.request.Request(url, headers={"User-Agent": "EduAccesible/8 (app educativa)"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def definiciones_de_extracto(extracto, maximo=3):
+    """Saca las primeras definiciones de la sección «Español» de un extracto de Wikcionario."""
+    m = re.search(r"^==\s*Español\s*==\s*$", extracto, re.M)
+    sec = extracto[m.end():] if m else extracto
+    fin = re.search(r"^==\s*[^=].*==\s*$", sec, re.M)
+    sec = sec[:fin.start()] if fin else sec
+    cat, defs = "", []
+    for linea in sec.splitlines():
+        h = re.match(r"^=+\s*(.+?)\s*=+\s*$", linea)
+        if h:
+            if re.match(r"(Sustantivo|Verbo|Adjetivo|Adverbio|Pronombre|Preposición|Interjección|Conjunción)", h.group(1)):
+                cat = h.group(1)
+            continue
+        d = re.match(r"^\s*(\d+)\s*[.:)]?\s+(\S.{7,})$", linea)
+        if d:
+            defs.append((f"{cat}: " if cat else "") + d.group(2).strip()[:220])
+            if len(defs) >= maximo:
+                break
+    return defs
+
+
+def definir_palabra(palabra):
+    """(texto, fuente). Primero lo guardado, luego Wikcionario (con internet) y por último el diccionario básico."""
+    clave = _sin_tildes(palabra)
+    try:
+        with open(RUTA_CACHE_DICC, encoding="utf-8") as f:
+            cache = json.load(f)
+    except Exception:
+        cache = {}
+    defs = cache.get(clave)
+    fuente = "guardado"
+    if not defs:
+        try:
+            url = "https://es.wiktionary.org/w/api.php?" + urllib.parse.urlencode(
+                {"action": "query", "prop": "extracts", "explaintext": 1, "redirects": 1, "titles": palabra,
+                 "format": "json", "formatversion": 2})
+            pag = _http_json(url)["query"]["pages"][0]
+            defs = definiciones_de_extracto(pag.get("extract", "")) if not pag.get("missing") else []
+            fuente = "Wikcionario"
+            if defs:
+                cache[clave] = defs
+                try:
+                    with open(RUTA_CACHE_DICC, "w", encoding="utf-8") as f:
+                        json.dump(cache, f, ensure_ascii=False)
+                except OSError:
+                    pass
+        except Exception as e:
+            print(f"Diccionario en internet no disponible: {e}")
+            defs = []
+    if not defs:
+        for k in (clave, clave.rstrip("s"), clave[:-2] if clave.endswith("es") else clave):
+            if k in DICCIONARIO_BASICO:
+                defs, fuente = [DICCIONARIO_BASICO[k]], "diccionario básico"
+                break
+    if not defs:
+        return None, ""
+    return f"{palabra}. " + " ".join(f"{i}. {d}" if len(defs) > 1 else d for i, d in enumerate(defs, 1)), fuente
+
+
+def detectar_idioma(texto):
+    palabras = re.findall(r"[a-záéíóúüñçãõàèêùœß]+", str(texto).lower())
+    puntos = {k: sum(p in set(v.split()) for p in palabras) for k, v in _STOP.items()}
+    puntos["es"] += 3 * len(re.findall(r"[ñ¿¡]", str(texto)))
+    puntos["pt"] += 2 * len(re.findall(r"[ãõç]", str(texto)))
+    mejor = max(puntos, key=puntos.get)
+    return mejor if puntos[mejor] > 0 else "es"
+
+
+def traducir_texto(texto, origen, destino):
+    """Traduce con MyMemory (gratis, necesita internet)."""
+    trozos = partir_parrafos(texto, 400) or [texto]
+    out = []
+    for t in trozos:
+        url = "https://api.mymemory.translated.net/get?" + urllib.parse.urlencode({"q": t, "langpair": f"{origen}|{destino}"})
+        datos = _http_json(url, timeout=10)
+        out.append(html.unescape(datos["responseData"]["translatedText"]))
+    return " ".join(out)
+
+
+# ---- código QR (propio, sin librerías): versiones 1 a 6, corrección L, modo bytes
+_QR_L = {1: (19, 7, 1), 2: (34, 10, 1), 3: (55, 15, 1), 4: (80, 20, 1), 5: (108, 26, 1), 6: (136, 18, 2)}
+_QR_ALIN = {1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34]}
+
+
+def _gf_mul(x, y):
+    z = 0
+    for i in range(7, -1, -1):
+        z = (z << 1) ^ ((z >> 7) * 0x11D)
+        z ^= ((y >> i) & 1) * x
+    return z
+
+
+def _rs_divisor(grado):
+    r = [0] * (grado - 1) + [1]
+    raiz = 1
+    for _ in range(grado):
+        for j in range(grado):
+            r[j] = _gf_mul(r[j], raiz)
+            if j + 1 < grado:
+                r[j] ^= r[j + 1]
+        raiz = _gf_mul(raiz, 2)
+    return r
+
+
+def _rs_resto(datos, divisor):
+    r = [0] * len(divisor)
+    for b in datos:
+        f = b ^ r.pop(0)
+        r.append(0)
+        for i, c in enumerate(divisor):
+            r[i] ^= _gf_mul(c, f)
+    return r
+
+
+def _qr_penalidad(M):
+    n, p = len(M), 0
+    for lineas in (M, [list(c) for c in zip(*M)]):
+        for fila in lineas:
+            corrida = 1
+            for i in range(1, n + 1):
+                if i < n and fila[i] == fila[i - 1]:
+                    corrida += 1
+                else:
+                    if corrida >= 5:
+                        p += corrida - 2
+                    corrida = 1
+            for i in range(n - 10):
+                seg = [int(v) for v in fila[i:i + 11]]
+                if seg == [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0] or seg == [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1]:
+                    p += 40
+    for y in range(n - 1):
+        for x in range(n - 1):
+            if M[y][x] == M[y][x + 1] == M[y + 1][x] == M[y + 1][x + 1]:
+                p += 3
+    oscuros = sum(sum(f) for f in M)
+    total = n * n
+    p += max(0, (abs(oscuros * 20 - total * 10) + total - 1) // total - 1) * 10
+    return p
+
+
+def qr_matriz(texto):
+    datos = texto.encode("utf-8")
+    version = next((v for v, (nd, _, _) in _QR_L.items() if 12 + 8 * len(datos) <= 8 * nd), None)
+    if version is None:
+        raise ValueError("texto demasiado largo para el código QR")
+    ndatos, nec, nbloques = _QR_L[version]
+    bits = []
+
+    def agregar(valor, n):
+        bits.extend((valor >> i) & 1 for i in range(n - 1, -1, -1))
+    agregar(4, 4)
+    agregar(len(datos), 8)
+    for b in datos:
+        agregar(b, 8)
+    agregar(0, min(4, ndatos * 8 - len(bits)))
+    while len(bits) % 8:
+        bits.append(0)
+    relleno = 0xEC
+    while len(bits) < ndatos * 8:
+        agregar(relleno, 8)
+        relleno ^= 0xEC ^ 0x11
+    pal = [int("".join(map(str, bits[i:i + 8])), 2) for i in range(0, len(bits), 8)]
+    por = ndatos // nbloques
+    bloques = [pal[i * por:(i + 1) * por] for i in range(nbloques)]
+    div = _rs_divisor(nec)
+    ecs = [_rs_resto(b, div) for b in bloques]
+    final = [b[i] for i in range(por) for b in bloques] + [e[i] for i in range(nec) for e in ecs]
+
+    n = 17 + 4 * version
+    mod = [[False] * n for _ in range(n)]
+    fun = [[False] * n for _ in range(n)]
+
+    def poner(x, y, v):
+        mod[y][x] = v
+        fun[y][x] = True
+    for i in range(n):
+        poner(6, i, i % 2 == 0)
+        poner(i, 6, i % 2 == 0)
+    for cx, cy in ((3, 3), (n - 4, 3), (3, n - 4)):
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
+                if 0 <= cx + dx < n and 0 <= cy + dy < n:
+                    poner(cx + dx, cy + dy, max(abs(dx), abs(dy)) not in (2, 4))
+    pos = _QR_ALIN[version]
+    for i, py in enumerate(pos):
+        for j, px in enumerate(pos):
+            if (i == 0 and j == 0) or (i == 0 and j == len(pos) - 1) or (i == len(pos) - 1 and j == 0):
+                continue
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    poner(px + dx, py + dy, max(abs(dx), abs(dy)) != 1)
+
+    def formato(M, mascara):
+        d = (1 << 3) | mascara  # nivel de corrección L = 01
+        r = d
+        for _ in range(10):
+            r = (r << 1) ^ ((r >> 9) * 0x537)
+        bf = ((d << 10) | r) ^ 0x5412
+
+        def p(x, y, i):
+            M[y][x] = ((bf >> i) & 1) != 0
+        for i in range(6):
+            p(8, i, i)
+        p(8, 7, 6)
+        p(8, 8, 7)
+        p(7, 8, 8)
+        for i in range(9, 15):
+            p(14 - i, 8, i)
+        for i in range(8):
+            p(n - 1 - i, 8, i)
+        for i in range(8, 15):
+            p(8, n - 15 + i, i)
+        M[n - 8][8] = True
+    formato(mod, 0)
+    fun_f = [f[:] for f in fun]
+    for y in range(n):  # marcar como función las zonas de formato
+        for x in range(n):
+            if (x == 8 and (y < 9 or y >= n - 8)) or (y == 8 and (x < 9 or x >= n - 8)):
+                fun[y][x] = True
+    i = 0
+    for derecha in range(n - 1, 0, -2):
+        if derecha <= 6:
+            derecha -= 1
+        for vert in range(n):
+            for j in range(2):
+                x = derecha - j
+                y = n - 1 - vert if ((derecha + 1) & 2) == 0 else vert
+                if not fun[y][x] and i < len(final) * 8:
+                    mod[y][x] = ((final[i >> 3] >> (7 - (i & 7))) & 1) != 0
+                    i += 1
+    mejor, mejor_p = None, None
+    for m in range(8):
+        M = [f[:] for f in mod]
+        for y in range(n):
+            for x in range(n):
+                if fun[y][x]:
+                    continue
+                inv = [(x + y) % 2 == 0, y % 2 == 0, x % 3 == 0, (x + y) % 3 == 0, (x // 3 + y // 2) % 2 == 0,
+                       x * y % 2 + x * y % 3 == 0, (x * y % 2 + x * y % 3) % 2 == 0, ((x + y) % 2 + x * y % 3) % 2 == 0][m]
+                M[y][x] ^= inv
+        formato(M, m)
+        p = _qr_penalidad(M)
+        if mejor_p is None or p < mejor_p:
+            mejor, mejor_p = M, p
+    return mejor
+
+
+def qr_imagen(texto, modulo=8, borde=4):
+    M = qr_matriz(texto)
+    n = len(M)
+    img = Image.new("L", ((n + 2 * borde) * modulo,) * 2, 255)
+    px = img.load()
+    for y in range(n):
+        for x in range(n):
+            if M[y][x]:
+                for dy in range(modulo):
+                    for dx in range(modulo):
+                        px[(x + borde) * modulo + dx, (y + borde) * modulo + dy] = 0
+    return img.convert("RGB")
+
+
+# ---- aviso de versión nueva y autoprueba
+URL_VERSION = ""  # p. ej. "https://raw.githubusercontent.com/USUARIO/REPO/main/version.json" (también sirve poner "url_version" en config.json)
+
+
+def tupla_version(s):
+    return tuple(int(x) for x in re.findall(r"\d+", str(s))) or (0,)
+
+
+def hay_version_nueva(actual, remota):
+    return tupla_version(remota) > tupla_version(actual)
+
+
+def consultar_version(url, timeout=6):
+    req = urllib.request.Request(url, headers={"User-Agent": "EduAccesible/8"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        crudo = r.read(20000).decode("utf-8", "ignore").strip()
+    try:
+        d = json.loads(crudo)
+        return d if isinstance(d, dict) else {"version": str(d)}
+    except ValueError:
+        return {"version": crudo.splitlines()[0] if crudo else ""}
+
+
+def resumen_autoprueba(e):
+    """Lista de frases con lo que falta. e: dict de booleanos (camara, microfono, reconocimiento, voz_es, lector)."""
+    f = []
+    if not e.get("camara"):
+        f.append("No encuentro la cámara. Puedes importar imágenes o conectar la del teléfono.")
+    if not e.get("microfono"):
+        f.append("No encuentro el micrófono.")
+    if not e.get("reconocimiento"):
+        f.append("Falta el reconocimiento de voz sin internet. Conéctate a internet una vez para descargarlo.")
+    if not e.get("voz_es"):
+        f.append("Windows no tiene una voz en español instalada.")
+    if not e.get("lector"):
+        f.append("El lector de texto no está disponible.")
+    return f
+
+
+# ---- nombres de los materiales guardados
+def titulo_material(texto, palabras=5):
+    t = str(texto).strip()
+    m = re.match(r"^[^:\n]{1,30}:\s*(.+)$", t, re.S)
+    if m:
+        t = m.group(1)
+    return " ".join(re.findall(r"[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", t)[:palabras])[:40]
+
+
+def nombre_archivo_material(modo, texto, ahora=None):
+    t = titulo_material(texto).replace(" ", "-")
+    return time.strftime("%Y%m%d_%H%M%S", time.localtime(ahora)) + f"_{modo}" + (f"_{t}" if t else "") + ".txt"
+
+
+def etiqueta_material(nombre):
+    m = re.match(r"^\d{4}(\d{2})(\d{2})_(\d{2})(\d{2})\d{2}_([a-z]+)(?:_(.*))?\.txt$", nombre)
+    if not m:
+        return nombre[:-4] if nombre.endswith(".txt") else nombre
+    mes, d, hh, mm, modo, titulo = m.groups()
+    nom = MODOS.get(modo, modo.capitalize())
+    return f"{(titulo or '').replace('-', ' ') or nom}  ·  {nom}  ·  {d}/{mes} {hh}:{mm}"
+
+
+# ===========================================================================
+# v11: del exe v9: dinero colombiano, diccionario en internet, traductor, actualización por Releases
+# ===========================================================================
+REPO_GITHUB = "Shimo-sae/Eduaccesible"  # de aquí se consulta la última versión publicada (Releases)
+
+
+def _migrar_perfiles():
+    """La v9 guardaba los perfiles como lista; aquí son un diccionario con los ajustes de cada uno."""
+    cfg = leer_config()
+    if isinstance(cfg.get("perfiles"), list):
+        nuevo = {str(n): {} for n in cfg["perfiles"]}
+        nuevo.setdefault("General", {})
+        actual = cfg.get("perfil", "General")
+        guardar_config(perfiles=nuevo, perfil_actual=actual if actual in nuevo else "General")
+
+
+_migrar_perfiles()
+
+
 def color_nombre(bgr):
     """Nombre en español de un color (b, g, r)."""
     px = np.uint8([[[int(bgr[0]), int(bgr[1]), int(bgr[2])]]])
@@ -4305,76 +5514,6 @@ def color_del_centro(frame):
     return color_nombre(mediana)
 
 
-def calidad_imagen(frame):
-    """(mensaje, ok): 'muy oscura', 'muy brillante', 'borrosa' o ok."""
-    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    g = cv2.resize(g, (320, max(1, int(g.shape[0] * 320 / g.shape[1]))), interpolation=cv2.INTER_AREA)
-    brillo = float(g.mean())
-    nitidez = float(cv2.Laplacian(g, cv2.CV_64F).var())
-    if brillo < 45:
-        return "Hay muy poca luz. Busca más luz.", False
-    if brillo > 225:
-        return "Hay demasiado brillo o reflejo. Inclina un poco el papel.", False
-    if nitidez < 25:
-        return "La imagen está borrosa. Aleja un poco la cámara y mantenla quieta.", False
-    return "", True
-
-
-_OPS_LIBRES = re.compile(r"(\d+(?:[.,]\d+)?)\s*([+×÷*])\s*(\d+(?:[.,]\d+)?)")
-_OPS_ESPACIO = re.compile(r"(?<![\w.,])(\d+(?:[.,]\d+)?)\s+([\-−–xX/:])\s+(\d+(?:[.,]\d+)?)(?![\w.,])")
-_PALABRA_OP = {"+": "más", "×": "por", "*": "por", "x": "por", "X": "por", "÷": "dividido entre", "/": "dividido entre",
-               ":": "dividido entre", "-": "menos", "−": "menos", "–": "menos"}
-
-
-def _num_hablado(x):
-    if abs(x - round(x)) < 1e-9:
-        return str(int(round(x)))
-    return f"{x:.2f}".rstrip("0").rstrip(".").replace(".", " coma ")
-
-
-def operaciones_habladas(texto, maximo=5):
-    """Detecta cuentas como '3 + 4' o '12 x 3 =' y devuelve cómo se dicen con su resultado."""
-    hallazgos = []
-    for rx in (_OPS_LIBRES, _OPS_ESPACIO):
-        for m in rx.finditer(texto):
-            hallazgos.append((m.start(), m.group(1), m.group(2), m.group(3)))
-    hallazgos.sort()
-    frases = []
-    for _, a, op, b in hallazgos[:maximo]:
-        x, y = float(a.replace(",", ".")), float(b.replace(",", "."))
-        if op in "+":
-            r = x + y
-        elif op in "×*xX":
-            r = x * y
-        elif op in "÷/:":
-            if y == 0:
-                frases.append(f"{_num_hablado(x)} dividido entre cero no se puede hacer.")
-                continue
-            r = x / y
-        else:
-            r = x - y
-        frases.append(f"{_num_hablado(x)} {_PALABRA_OP[op]} {_num_hablado(y)} es igual a {_num_hablado(r)}.")
-    return " ".join(frases)
-
-
-def nombre_material(modo, texto):
-    t = re.sub(r"^(El texto dice|Cifra detectada|Letra)\s*:?\s*", "", texto.strip(), flags=re.I)
-    t = re.sub(r'[<>:"/\\|?*\n\r\t]+', " ", t)
-    slug = " ".join(t.split()[:6])[:40].strip(" .")
-    base = f"{time.strftime('%Y%m%d_%H%M%S')}_{modo}"
-    return f"{base}_{slug}.txt" if slug else f"{base}.txt"
-
-
-def nombre_bonito(archivo):
-    """'20261028_132301_texto_Hola mundo.txt' -> '28/10 13:23 · Texto · Hola mundo' (con ★ si es favorito)."""
-    fav = archivo.startswith("★")
-    a = archivo.lstrip("★_ ")
-    m = re.match(r"^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})\d{2}_([a-z]+)(?:_(.*))?\.txt$", a)
-    if not m:
-        return ("★ " if fav else "") + a.rsplit(".", 1)[0]
-    _, mes, dia, hh, mm, modo, slug = m.groups()
-    modo = {"numeros": "Números", "objetos": "Objetos", "figuras": "Figuras", "documento": "Documento"}.get(modo, modo.capitalize())
-    return f"{'★ ' if fav else ''}{dia}/{mes} {hh}:{mm} · {modo}" + (f" · {slug}" if slug else "")
 
 
 def _pedir_json(url, espera=6):
@@ -4745,6 +5884,31 @@ def ultima_version():
     except Exception as e:
         print(f"Buscar versión: {e}")
         return None, None
+
+
+def definir_palabra(palabra):
+    """(texto, fuente): lo guardado, luego Wikcionario/Wikipedia (internet) y por último el diccionario básico."""
+    clave = _sin_tildes(palabra)
+    try:
+        with open(RUTA_CACHE_DICC, encoding="utf-8") as f:
+            cache = json.load(f)
+    except Exception:
+        cache = {}
+    if cache.get(clave):
+        return cache[clave][0], "guardado"
+    r = buscar_significado(palabra)
+    if r:
+        cache[clave] = [r]
+        try:
+            with open(RUTA_CACHE_DICC, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False)
+        except OSError:
+            pass
+        return r, "internet"
+    for k in (clave, clave.rstrip("s"), clave[:-2] if clave.endswith("es") else clave):
+        if k in DICCIONARIO_BASICO:
+            return f"{palabra}. {DICCIONARIO_BASICO[k]}", "diccionario básico"
+    return None, ""
 
 
 def diagnostico():

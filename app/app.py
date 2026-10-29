@@ -1,5 +1,7 @@
 import collections
 import difflib
+import subprocess
+import tempfile
 import html
 import math
 import unicodedata
@@ -95,7 +97,8 @@ CARPETA_MATERIALES = os.path.join(BASE_DIR, "materiales")
 CARPETA_ENTRADA = os.path.join(BASE_DIR, "entrada")
 os.makedirs(CARPETA_DEBUG, exist_ok=True)
 RUTA_LOG = os.path.join(CARPETA_DEBUG, "registro.txt")
-VERSION_APP = "v8"
+VERSION_APP = "v9"
+REPO_GITHUB = "Shimo-sae/Eduaccesible"  # de aquí se consulta la última versión publicada (Releases)
 URL_VERSION = ""  # opcional: dirección de un archivo de texto con la última versión (por ejemplo "v9"). Vacío = no comprobar
 
 
@@ -1284,6 +1287,7 @@ ORDENES = [
     (("parrafo anterior", "anterior", "retroceder"), "anterior"),
     (("siguiente parrafo", "siguiente", "adelantar", "adelante"), "siguiente"),
     (("ayuda de encuadre", "guia de encuadre", "encuadre"), "encuadre"),
+    (("actualizar", "actualizacion", "buscar actualizacion", "nueva version"), "actualizar"),
     (("tutorial", "bienvenida", "como se usa", "instrucciones"), "tutorial"),
     (("de que color es", "que color es", "color", "colores"), "color"),
     (("significado", "que significa", "definicion", "definir"), "significado"),
@@ -1381,7 +1385,7 @@ GRAMATICA = ["capturar", "captura", "foto", "tomar", "escanear", "atrás", "volv
              "encuadre", "tutorial", "bienvenida", "cómo se usa", "instrucciones", "color", "de qué color es",
              "qué color es", "significado", "traducir", "traducir al español", "cambiar perfil", "perfil",
              "ayuda", "señas", "lista de señas", "qué señas hay", "ayuda de señas", "seña de voz", "seña de ayuda",
-             "billetes", "billete", "monedas", "moneda", "dinero", "plata", "total", "reiniciar cuenta", "borrar cuenta",
+             "actualizar", "actualización", "billetes", "billete", "monedas", "moneda", "dinero", "plata", "total", "reiniciar cuenta", "borrar cuenta",
              "[unk]"]
 # Preguntas "¿cuál es la seña de ...?" para cada cosa que tiene seña (con tildes, como en el modelo de voz)
 for _cosa in ("leer texto", "letras", "números", "figuras", "contar objetos", "materiales", "ajustes", "capturar",
@@ -2284,6 +2288,7 @@ class EduAccesibleApp:
             ("👤  Perfil: " + leer_config().get("perfil", "General"), AMARILLO, TEXTO, self.cambiar_perfil),
             ("📖  Tutorial hablado", VERDE, "white", self.tutorial),
             ("🐢  Modo equipo lento: " + ("activado" if hay_modo_lento() else "apagado"), NARANJA, "white", self.alternar_lento),
+            ("🔄  Buscar actualización  (" + VERSION_APP + ")", VERDE, "white", self.pedir_actualizacion),
             ("🛠  Diagnóstico (para enviar si algo falla)", AMARILLO, TEXTO, self.abrir_diagnostico),
             ("📱  Micrófono del teléfono (por Wi-Fi)", AMARILLO, TEXTO, self.conectar_mic_telefono),
         ]:
@@ -2303,6 +2308,8 @@ class EduAccesibleApp:
                 self.btn_contraste = b
             if "Perfil:" in texto:
                 self.btn_perfil = b
+            if "actualización" in texto:
+                self.btn_actualizar = b
         return ext
 
     def _pantalla_senas(self):
@@ -2795,7 +2802,7 @@ class EduAccesibleApp:
              "pausa": self.pausar_lectura, "continuar": self.continuar_lectura,
              "siguiente": lambda: self.mover_lectura(1), "anterior": lambda: self.mover_lectura(-1),
              "encuadre": self.alternar_encuadre, "tutorial": self.tutorial, "color": self.decir_color,
-             "significado": self.decir_significado, "dinero_total": self.decir_total_dinero, "dinero_reiniciar": self.reiniciar_dinero, "traducir": lambda: self.traducir_ultimo("es", "en"),
+             "significado": self.decir_significado, "actualizar": self.pedir_actualizacion, "dinero_total": self.decir_total_dinero, "dinero_reiniciar": self.reiniciar_dinero, "traducir": lambda: self.traducir_ultimo("es", "en"),
              "traducir_es": lambda: self.traducir_ultimo("en", "es"), "perfil": self.cambiar_perfil,
              "senas_lista": self.abrir_senas}[orden]()
 
@@ -3814,17 +3821,66 @@ class EduAccesibleApp:
         if problemas:
             self.voz.hablar("Atención: " + ", ".join(problemas) + ". Abre Ajustes, Diagnóstico, para más detalles.")
 
-    def buscar_version(self):
-        if not URL_VERSION:
+    # ---------------------------- Actualizaciones ----------------------------
+    nueva_version = None
+    btn_actualizar = None
+
+    def buscar_version(self, manual=False):
+        """Mira en GitHub (Releases) si hay una versión más nueva que VERSION_APP."""
+        tag, url = ultima_version()
+        if not tag:
+            if manual:
+                self.anunciar("No pude revisar si hay actualizaciones. Mira tu conexión a internet.")
             return
+        if url and _numeros_version(tag) > _numeros_version(VERSION_APP):
+            self.nueva_version = (tag, url)
+            self.ui(self._ofrecer_actualizacion)
+        elif manual:
+            self.anunciar(f"Ya tienes la última versión, {VERSION_APP}.")
+
+    def _ofrecer_actualizacion(self):
+        tag = self.nueva_version[0]
+        if self.btn_actualizar is not None:
+            self.btn_actualizar.config(text=f"⬇  Actualizar a {tag}")
+        self.voz.hablar(f"Hay una versión nueva de EduAccesible: {tag}. Di actualizar, o toca el botón Actualizar en Ajustes.")
+
+    def pedir_actualizacion(self):
+        if not self.nueva_version:
+            self.voz.hablar("Buscando actualizaciones.")
+            threading.Thread(target=lambda: self.buscar_version(manual=True), daemon=True).start()
+            return
+        tag, url = self.nueva_version
+        if messagebox.askyesno("Actualizar", f"¿Instalar la versión {tag}?\nLa aplicación se cerrará y se volverá a abrir. "
+                                             "Tus materiales y ajustes se conservan.", parent=self.root):
+            threading.Thread(target=self._descargar_e_instalar, args=(url,), daemon=True).start()
+
+    def _descargar_e_instalar(self, url):
         try:
-            req = urllib.request.Request(URL_VERSION, headers={"User-Agent": "EduAccesible"})
-            with urllib.request.urlopen(req, timeout=5) as r:
-                nueva = r.read().decode("utf-8", errors="ignore").strip().split()[0]
-            if nueva and nueva != VERSION_APP:
-                self.ui(lambda: self.voz.hablar(f"Hay una versión nueva de EduAccesible: {nueva}. Pide el instalador."))
-        except Exception:
-            pass
+            destino = os.path.join(tempfile.gettempdir(), "EduAccesible-Instalador-nuevo.exe")
+            self.anunciar("Descargando la actualización. Puede tardar unos minutos.")
+            req = urllib.request.Request(url, headers={"User-Agent": "EduAccesible"})
+            with urllib.request.urlopen(req, timeout=30) as r, open(destino, "wb") as f:
+                total, leido, ultimo = int(r.headers.get("Content-Length") or 0), 0, 0.0
+                while True:
+                    trozo = r.read(1 << 20)
+                    if not trozo:
+                        break
+                    f.write(trozo)
+                    leido += len(trozo)
+                    if total and time.time() - ultimo > 2:
+                        ultimo = time.time()
+                        self.estado(f"⬇ Descargando la actualización: {leido * 100 // total} %")
+            if os.path.getsize(destino) < 20_000_000:
+                raise IOError("la descarga quedó incompleta")
+            self.ui(lambda: self._lanzar_instalador(destino))
+        except Exception as e:
+            print(f"Actualización: {e}")
+            self.anunciar("No pude descargar la actualización. Revisa tu conexión a internet e inténtalo otra vez.")
+
+    def _lanzar_instalador(self, destino):
+        self.voz.hablar("Instalando la actualización. La aplicación se reiniciará sola.")
+        subprocess.Popen([destino, "/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"], close_fds=True)
+        self.root.after(2500, self.cerrar)
 
     def alternar_lento(self):
         self.modo_lento = not self.modo_lento
@@ -4671,6 +4727,24 @@ def frase_monedas(monedas):
     if seguras:
         txt += f" Las seguras suman {pesos_hablados(total)}."
     return txt, total
+
+
+def _numeros_version(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or ""))
+
+
+def ultima_version():
+    """(etiqueta, dirección del instalador) de la última publicación (Release) en GitHub, o (None, None)."""
+    try:
+        d = _pedir_json(f"https://api.github.com/repos/{REPO_GITHUB}/releases/latest", espera=8)
+        tag = d.get("tag_name") or ""
+        for a in d.get("assets", []):
+            if str(a.get("name", "")).lower().endswith(".exe"):
+                return tag, a.get("browser_download_url")
+        return tag or None, None
+    except Exception as e:
+        print(f"Buscar versión: {e}")
+        return None, None
 
 
 def diagnostico():

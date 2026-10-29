@@ -6,12 +6,14 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Instalar Tesseract e Inno Setup
@@ -34,7 +36,7 @@ jobs:
       - name: Crear el programa con PyInstaller
         run: >
           python -m PyInstaller --noconfirm --clean --onedir --noconsole --name EduAccesible
-          --collect-all mediapipe --collect-all rapidocr_onnxruntime --collect-all vosk --collect-all onnxruntime --collect-all pypdfium2 --collect-all docx
+          --collect-all mediapipe --collect-all rapidocr_onnxruntime --collect-all vosk --collect-all onnxruntime --collect-all pypdfium2 --collect-all docx --collect-all segno
           --collect-submodules win32com --hidden-import pythoncom --hidden-import win32timezone
           --hidden-import pyttsx3.drivers --hidden-import pyttsx3.drivers.sapi5
           --icon logo.ico --exclude-module IPython --exclude-module pytest --exclude-module notebook --exclude-module tkinter.test app.py
@@ -47,7 +49,19 @@ jobs:
       - name: Crear el instalador
         shell: pwsh
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" instalador.iss'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: EduAccesible-Instalador-exe
           path: app/Output/EduAccesible-Instalador.exe
+      - name: Leer la versión de app.py
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path app.py -Pattern '^VERSION_APP = "(.+)"').Matches[0].Groups[1].Value
+          "tag=$v" >> $env:GITHUB_OUTPUT
+      - name: Publicar el instalador en Releases (para la actualización automática)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: EduAccesible ${{ steps.ver.outputs.tag }}
+          files: app/Output/EduAccesible-Instalador.exe

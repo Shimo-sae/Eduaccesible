@@ -98,7 +98,7 @@ CARPETA_MATERIALES = os.path.join(BASE_DIR, "materiales")
 CARPETA_ENTRADA = os.path.join(BASE_DIR, "entrada")
 os.makedirs(CARPETA_DEBUG, exist_ok=True)
 RUTA_LOG = os.path.join(CARPETA_DEBUG, "registro.txt")
-VERSION_APP = "v11"
+VERSION_APP = "v13"
 
 
 class _Tee:
@@ -688,13 +688,13 @@ class MotorOCR:
             cv2.imwrite(os.path.join(CARPETA_DEBUG, "procesada.png"), imgs[nombre])
         return t, "Tesseract"
 
-    def numeros(self, frame):
+    def numeros(self, frame, lineas=None):
         self.listo.wait(90)
         permitidos = "0123456789+-$%.,"
         if self.rapid is not None:
             try:
                 partes = []
-                for linea in self._rapid_lineas(frame):
+                for linea in (lineas if lineas is not None else self._rapid_lineas(frame)):
                     if any(ch.isdigit() for ch in linea):
                         linea = linea.translate(str.maketrans("OolI", "0011"))  # confusiones típicas
                         s = "".join(ch for ch in linea if ch in permitidos or ch == " ").strip()
@@ -905,7 +905,7 @@ class DetectorObjetos:
         finally:
             self.listo.set()
 
-    def detectar(self, frame, conf=0.45, iou=0.5):
+    def detectar(self, frame, conf=0.32, iou=0.5):
         """Devuelve [(índice_clase, confianza, (x1, y1, x2, y2))] en coordenadas del frame."""
         h, w = frame.shape[:2]
         r = min(self.TAM / h, self.TAM / w)
@@ -941,6 +941,38 @@ class DetectorObjetos:
                 if x2 > x1 and y2 > y1:
                     resultado.append((int(c), float(puntaje[idx[k]]), (x1, y1, x2, y2)))
         return sorted(resultado, key=lambda d: d[2][0])
+
+
+def piezas_sin_nombre(frame, detecciones=()):
+    """Objetos que el detector no sabe nombrar (lápices, borradores, fichas...): se separan del fondo liso.
+    Devuelve las cajas (x, y, w, h) en coordenadas del frame, sin las que ya están dentro de algo detectado."""
+    h0, w0 = frame.shape[:2]
+    esc = 640.0 / max(h0, w0)
+    p = cv2.GaussianBlur(cv2.resize(frame, None, fx=esc, fy=esc, interpolation=cv2.INTER_AREA), (5, 5), 0)
+    lab = cv2.cvtColor(p, cv2.COLOR_BGR2LAB).astype(np.float32)
+    H, W = lab.shape[:2]
+    borde = np.concatenate([lab[:6].reshape(-1, 3), lab[-6:].reshape(-1, 3),
+                            lab[:, :6].reshape(-1, 3), lab[:, -6:].reshape(-1, 3)])
+    fondo = np.median(borde, axis=0)
+    dif = np.sqrt(((lab - fondo) ** 2).sum(2))
+    mascara = (dif > max(18.0, float(np.percentile(np.sqrt(((borde - fondo) ** 2).sum(1)), 95)) * 2.0)).astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    mascara = cv2.morphologyEx(cv2.morphologyEx(mascara, cv2.MORPH_OPEN, k), cv2.MORPH_CLOSE, k)
+    contornos, _ = cv2.findContours(mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    total = H * W
+    cajas = []
+    for c in contornos:
+        area = cv2.contourArea(c)
+        x, y, w, h = cv2.boundingRect(c)
+        if area < total * 0.004 or area > total * 0.5:
+            continue
+        if x <= 1 or y <= 1 or x + w >= W - 1 or y + h >= H - 1:
+            continue
+        cx, cy = (x + w / 2) / esc, (y + h / 2) / esc
+        if any(x1 <= cx <= x2 and y1 <= cy <= y2 for _, _, (x1, y1, x2, y2) in detecciones):
+            continue
+        cajas.append((int(x / esc), int(y / esc), int(w / esc), int(h / esc)))
+    return cajas[:15]
 
 
 def frase_conteo(detecciones):
@@ -3355,16 +3387,21 @@ class EduAccesibleApp:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 120, 0), 2)
         cv2.imwrite(os.path.join(CARPETA_DEBUG, "objetos.png"), anotada)
         print(f"DEBUG - objetos: {[(CLASES_ES[c][0], round(p, 2)) for c, p, _ in detecciones]}")
+        try:
+            otras = piezas_sin_nombre(frame, detecciones)
+        except Exception as e:
+            print(f"Piezas sin nombre: {e}")
+            otras = []
+        print(f"DEBUG - objetos sin nombre: {len(otras)}")
+        n = len(otras)
+        resto = f"{n} objeto{'s' if n != 1 else ''} más que no sé nombrar" if n else ""
         if detecciones:
-            self.anunciar(frase_conteo(detecciones), guardar_modo="objetos")
-            return
-        # Sin objetos conocidos (el modelo no sabe de lápices, fichas, etc.): contar piezas de color sueltas
-        h, w = frame.shape[:2]
-        pequeno = cv2.resize(frame, (800, int(h * 800 / w)))
-        piezas = [a for a in _candidatos_figuras(pequeno) if a["color"] not in ("blanco", "negro", "gris")]
-        if piezas:
-            n = len(piezas)
-            self.anunciar(f"No reconocí objetos por su nombre, pero veo {n} pieza{'s' if n != 1 else ''} de color.",
+            frase = frase_conteo(detecciones)
+            if resto:
+                frase = frase.rstrip(".") + f", y además {resto}."
+            self.anunciar(frase, guardar_modo="objetos")
+        elif n:
+            self.anunciar(f"No reconocí objetos por su nombre, pero veo {n} objeto{'s' if n != 1 else ''} separado{'s' if n != 1 else ''} del fondo.",
                           guardar_modo="objetos")
         else:
             self.anunciar("No se detectaron objetos. Acerca la cámara, usa buena luz y un fondo liso.")
@@ -4204,16 +4241,24 @@ class EduAccesibleApp:
         self.anunciar("Cuenta en cero.")
 
     def _modo_dinero(self, frame):
+        t0 = time.time()
+        alto, ancho = frame.shape[:2]
+        if max(alto, ancho) > 1000:  # imágenes enormes hacen lento el análisis
+            f = 1000.0 / max(alto, ancho)
+            frame = cv2.resize(frame, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        texto = ""
         try:
-            texto, _ = self.ocr.texto(frame, (11, 6), 30)
+            self.ocr.listo.wait(90)
+            if self.ocr.rapid is not None:
+                lineas = self.ocr._rapid_lineas(frame)  # UNA sola lectura: de ahí salen texto y números
+                texto = " ".join(lineas)
+                if not valores_en_texto(texto, BILLETES):
+                    texto += " " + self.ocr.numeros(frame, lineas)
+            else:
+                texto, _ = self.ocr.texto(frame, (6,), 12)
         except Exception as e:
-            print(f"Dinero (texto): {e}")
-            texto = ""
-        if not valores_en_texto(texto, BILLETES):
-            try:
-                texto += " " + self.ocr.numeros(frame)
-            except Exception as e:
-                print(f"Dinero (números): {e}")
+            print(f"Dinero (OCR): {e}")
+        print(f"DEBUG - dinero: OCR en {time.time() - t0:.1f} s")
         color = color_dominante_billete(frame)
         print(f"DEBUG - dinero: texto={texto!r} color={color}")
         if valores_en_texto(texto, BILLETES):
@@ -5784,8 +5829,13 @@ def _tipo_metal(hsv_px):
 
 def clasificar_moneda(frame, x, y, r):
     """(metal_centro, metal_borde) de una moneda: si son distintos es bimetálica."""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    yy, xx = np.ogrid[:frame.shape[0], :frame.shape[1]]
+    x0, y0 = int(max(0, x - r)), int(max(0, y - r))
+    sub = frame[y0:int(y + r) + 1, x0:int(x + r) + 1]  # solo la zona de la moneda (no toda la imagen)
+    if sub.size == 0:
+        return None, None
+    x, y = x - x0, y - y0
+    hsv = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)
+    yy, xx = np.ogrid[:sub.shape[0], :sub.shape[1]]
     d = np.sqrt((xx - x) ** 2 + (yy - y) ** 2)
     centro = hsv[d < r * 0.45]
     borde = hsv[(d > r * 0.78) & (d < r * 0.95)]
@@ -5810,13 +5860,13 @@ def identificar_monedas(frame, leer_numeros=None):
     """Lista de dicts {valor, seguro, opciones} y el texto hablado. leer_numeros(recorte)->texto (opcional)."""
     circulos = detectar_circulos(frame)
     monedas = []
-    for x, y, r in circulos:
+    for x, y, r in circulos[:8]:
         c, b = clasificar_moneda(frame, x, y, r)
         opciones = posibles_moneda(c, b)
         if not opciones:
             continue
         leido = 0
-        if leer_numeros is not None:
+        if leer_numeros is not None and len(opciones) > 1:  # solo se lee el número si hay duda (más rápido)
             x0, y0 = int(max(0, x - r)), int(max(0, y - r))
             recorte = frame[y0:int(y + r), x0:int(x + r)]
             if recorte.size:
